@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">NodeMap</string>
+    <string name="tracking_notification_channel">위치 기록</string>
+    <string name="tracking_notification_title">NodeMap 위치 기록 중</string>
+</resources>
