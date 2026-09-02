@@ -6,10 +6,11 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.net.Uri
-import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,10 +31,10 @@ import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,7 +56,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -85,7 +87,6 @@ import kotlin.math.roundToInt
 
 private const val HOUR_MS = 60 * 60_000L
 private const val SCRUBBER_WINDOW_MS = 6 * HOUR_MS
-private const val SCRUBBER_MAP_UPDATE_MS = 72L
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val dateFormatter = DateTimeFormatter.ofPattern("M월 d일 EEEE", Locale.KOREAN)
 
@@ -141,8 +142,8 @@ fun TimelineScreen() {
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .clip(RoundedCornerShape(28.dp)),
+                    .padding(horizontal = 14.dp)
+                    .clip(RoundedCornerShape(24.dp)),
             ) {
                 TimelineMap(
                     modifier = Modifier.fillMaxSize(),
@@ -158,35 +159,46 @@ fun TimelineScreen() {
                     latestPoint = latestPoint,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(12.dp),
+                        .padding(10.dp),
                 )
                 if ((now - selectedTime).absoluteValue > 5 * 60_000L) {
                     Surface(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(12.dp)
+                            .padding(10.dp)
                             .clickable { selectedTime = System.currentTimeMillis() },
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                         shadowElevation = 3.dp,
                     ) {
                         Row(
-                            Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
+                            Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
                                 Icons.Rounded.MyLocation,
                                 contentDescription = null,
-                                modifier = Modifier.size(20.dp),
+                                modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.primary,
                             )
                             Text(
                                 "지금",
                                 style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.padding(start = 5.dp),
+                                modifier = Modifier.padding(start = 4.dp),
                             )
                         }
                     }
+                }
+                SmallFloatingActionButton(
+                    onClick = { manualPinOpen = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp),
+                    shape = RoundedCornerShape(15.dp),
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = "압정 추가", modifier = Modifier.size(24.dp))
                 }
             }
 
@@ -198,18 +210,6 @@ fun TimelineScreen() {
                 rangeEnd = historyEnd,
                 onTime = { selectedTime = it },
             )
-        }
-
-        FloatingActionButton(
-            onClick = { manualPinOpen = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 22.dp, bottom = 18.dp),
-            shape = RoundedCornerShape(20.dp),
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-        ) {
-            Icon(Icons.Rounded.Add, contentDescription = "압정 추가", modifier = Modifier.size(30.dp))
         }
     }
 
@@ -262,13 +262,13 @@ private fun TimelineDateHeader(date: LocalDate, hasSelectableDays: Boolean, onCl
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 6.dp)
             .clickable(enabled = hasSelectableDays, onClick = onClick),
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surface,
     ) {
         Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
@@ -287,7 +287,7 @@ private fun TimelineDateHeader(date: LocalDate, hasSelectableDays: Boolean, onCl
                 )
             }
             Surface(
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(42.dp),
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primaryContainer,
             ) {
@@ -297,7 +297,7 @@ private fun TimelineDateHeader(date: LocalDate, hasSelectableDays: Boolean, onCl
                         contentDescription = "날짜 선택",
                         tint = if (hasSelectableDays) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.size(26.dp),
+                        modifier = Modifier.size(23.dp),
                     )
                 }
             }
@@ -323,9 +323,9 @@ private fun TimelineMap(
             onResume()
         }
     }
-    val currentIcon = remember(context) { makeDotIcon(context, 42f, android.graphics.Color.rgb(49, 130, 246)) }
-    val selectedIcon = remember(context) { makeDotIcon(context, 34f, android.graphics.Color.rgb(25, 31, 40)) }
-    val eventIcon = remember(context) { makeDotIcon(context, 30f, android.graphics.Color.rgb(240, 68, 82)) }
+    val currentIcon = remember(context) { makeDotIcon(context, 38f, android.graphics.Color.rgb(49, 130, 246)) }
+    val selectedIcon = remember(context) { makeDotIcon(context, 30f, android.graphics.Color.rgb(25, 31, 40)) }
+    val eventIcon = remember(context) { makeDotIcon(context, 27f, android.graphics.Color.rgb(240, 68, 82)) }
     var appliedStyle by remember { mutableStateOf<String?>(null) }
     var focusedDay by remember { mutableStateOf<LocalDate?>(null) }
 
@@ -510,14 +510,14 @@ private fun TrackingStatusPill(
         shadowElevation = 3.dp,
     ) {
         Row(
-            Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
+            Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Surface(shape = CircleShape, color = dotColor, modifier = Modifier.size(9.dp)) {}
+            Surface(shape = CircleShape, color = dotColor, modifier = Modifier.size(8.dp)) {}
             Text(
                 text,
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.padding(start = 7.dp),
+                modifier = Modifier.padding(start = 6.dp),
             )
         }
     }
@@ -532,9 +532,14 @@ private fun TimelineScrubber(
     onTime: (Long) -> Unit,
 ) {
     val selectedState = rememberUpdatedState(selectedTime)
+    val rangeStartState = rememberUpdatedState(rangeStart)
+    val rangeEndState = rememberUpdatedState(rangeEnd)
     val onTimeState = rememberUpdatedState(onTime)
     var dragging by remember { mutableStateOf(false) }
     var previewTime by remember { mutableLongStateOf(selectedTime) }
+    var dragStartTime by remember { mutableLongStateOf(selectedTime) }
+    var totalDragPx by remember { mutableFloatStateOf(0f) }
+    var scrubberWidthPx by remember { mutableFloatStateOf(1f) }
     val displayTime = if (dragging) previewTime else selectedTime
     val primary = MaterialTheme.colorScheme.primary
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
@@ -544,21 +549,29 @@ private fun TimelineScrubber(
         if (!dragging) previewTime = selectedTime
     }
 
+    val dragState = rememberDraggableState { delta ->
+        totalDragPx += delta
+        val millisPerPixel = SCRUBBER_WINDOW_MS.toDouble() / scrubberWidthPx.coerceAtLeast(1f).toDouble()
+        previewTime = (dragStartTime - totalDragPx * millisPerPixel)
+            .toLong()
+            .coerceIn(rangeStartState.value, rangeEndState.value)
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        shape = RoundedCornerShape(24.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(21.dp),
         color = MaterialTheme.colorScheme.surface,
     ) {
-        Column(Modifier.padding(top = 12.dp, bottom = 8.dp)) {
+        Column(Modifier.padding(top = 10.dp, bottom = 6.dp)) {
             Text(
                 formatTime(displayTime),
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
             Text(
-                "좌우로 드래그 · 날짜 경계도 이어집니다",
+                "좌우로 드래그 · 손을 놓으면 지도에 반영됩니다",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
@@ -568,43 +581,24 @@ private fun TimelineScrubber(
             Canvas(
                 Modifier
                     .fillMaxWidth()
-                    .height(86.dp)
-                    .pointerInput(rangeStart, rangeEnd) {
-                        var dragStartTime = selectedState.value
-                        var totalDrag = 0f
-                        var lastMapUpdate = 0L
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                dragging = true
-                                dragStartTime = selectedState.value
-                                previewTime = dragStartTime
-                                totalDrag = 0f
-                                lastMapUpdate = 0L
-                            },
-                            onHorizontalDrag = { change, dragAmount ->
-                                change.consume()
-                                totalDrag += dragAmount
-                                val millisPerPixel = SCRUBBER_WINDOW_MS.toDouble() / size.width.toDouble()
-                                val target = (dragStartTime - totalDrag * millisPerPixel)
-                                    .toLong()
-                                    .coerceIn(rangeStart, rangeEnd)
-                                previewTime = target
-                                val now = SystemClock.uptimeMillis()
-                                if (now - lastMapUpdate >= SCRUBBER_MAP_UPDATE_MS) {
-                                    lastMapUpdate = now
-                                    onTimeState.value(target)
-                                }
-                            },
-                            onDragEnd = {
-                                onTimeState.value(previewTime)
-                                dragging = false
-                            },
-                            onDragCancel = {
-                                onTimeState.value(previewTime)
-                                dragging = false
-                            },
-                        )
-                    },
+                    .height(72.dp)
+                    .onSizeChanged { scrubberWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                    .draggable(
+                        state = dragState,
+                        orientation = Orientation.Horizontal,
+                        startDragImmediately = true,
+                        onDragStarted = {
+                            dragging = true
+                            dragStartTime = selectedState.value
+                            previewTime = dragStartTime
+                            totalDragPx = 0f
+                        },
+                        onDragStopped = {
+                            val committedTime = previewTime
+                            dragging = false
+                            onTimeState.value(committedTime)
+                        },
+                    ),
             ) {
                 val center = size.width / 2f
                 val pixelsPerMinute = size.width / (6f * 60f)
@@ -614,12 +608,12 @@ private fun TimelineScrubber(
                     val absoluteMinute = centerMinute + offsetMinutes
                     val major = absoluteMinute % 60L == 0L
                     val half = absoluteMinute % 30L == 0L
-                    val height = if (major) 34f else if (half) 24f else 13f
+                    val height = if (major) 30f else if (half) 21f else 11f
                     drawLine(
                         color = tickColor,
                         start = Offset(x, size.height - height),
                         end = Offset(x, size.height),
-                        strokeWidth = if (major) 2.4f else 1.4f,
+                        strokeWidth = if (major) 2.2f else 1.3f,
                         cap = StrokeCap.Round,
                     )
                 }
@@ -628,8 +622,8 @@ private fun TimelineScrubber(
                     if (deltaMinutes in -180f..180f) {
                         drawCircle(
                             color = eventColor,
-                            radius = 6f,
-                            center = Offset(center + deltaMinutes * pixelsPerMinute, 13f),
+                            radius = 5f,
+                            center = Offset(center + deltaMinutes * pixelsPerMinute, 11f),
                         )
                     }
                 }
@@ -637,7 +631,7 @@ private fun TimelineScrubber(
                     color = primary,
                     start = Offset(center, 3f),
                     end = Offset(center, size.height),
-                    strokeWidth = 5f,
+                    strokeWidth = 4f,
                     cap = StrokeCap.Round,
                 )
             }
@@ -661,13 +655,13 @@ private fun SelectedEventStrip(events: List<TimelineEvent>, selectedTime: Long) 
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 7.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp)
                 .clickable { detail = event },
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.surface,
         ) {
             Row(
-                Modifier.padding(14.dp),
+                Modifier.padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
@@ -676,11 +670,11 @@ private fun SelectedEventStrip(events: List<TimelineEvent>, selectedTime: Long) 
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
-                            .padding(10.dp)
-                            .size(24.dp),
+                            .padding(8.dp)
+                            .size(22.dp),
                     )
                 }
-                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Column(Modifier.padding(start = 10.dp).weight(1f)) {
                     Text("${event.title} · ${formatTime(event.timestamp)}", style = MaterialTheme.typography.titleMedium)
                     event.body?.let {
                         Text(
