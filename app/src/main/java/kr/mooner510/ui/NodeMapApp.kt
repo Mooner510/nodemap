@@ -106,16 +106,16 @@ private fun NodeBottomBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        shape = RoundedCornerShape(28.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 8.dp,
+        shadowElevation = 7.dp,
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(72.dp)
-                .padding(6.dp),
+                .height(62.dp)
+                .padding(5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             tabs.forEachIndexed { index, tab ->
@@ -123,9 +123,9 @@ private fun NodeBottomBar(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .height(60.dp)
+                        .height(52.dp)
                         .clickable { onSelected(index) },
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(18.dp),
                     color = if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
                 ) {
                     Column(
@@ -137,7 +137,7 @@ private fun NodeBottomBar(
                             contentDescription = tab.label,
                             tint = if (active) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(28.dp),
+                            modifier = Modifier.size(25.dp),
                         )
                         Text(
                             tab.label,
@@ -145,7 +145,7 @@ private fun NodeBottomBar(
                             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                             color = if (active) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 3.dp),
+                            modifier = Modifier.padding(top = 2.dp),
                         )
                     }
                 }
