@@ -5,7 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
+import android.provider.Settings as AndroidSettings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -25,7 +25,6 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Message
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Phone
@@ -43,8 +42,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,8 +54,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.mooner510.appGraph
 import kr.mooner510.data.AppSettings
@@ -71,8 +75,10 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val graph = context.appGraph
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val settings by graph.preferences.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val downloadState by graph.offlineMapManager.downloadState.collectAsStateWithLifecycle()
+    var permissionRefresh by remember { mutableIntStateOf(0) }
     var regions by remember { mutableStateOf(emptyList<OfflineRegionInfo>()) }
     var trackDays by remember { mutableStateOf(emptyList<LocalDate>()) }
     var offlineStart by remember { mutableStateOf<LocalDate?>(null) }
@@ -82,6 +88,14 @@ fun SettingsScreen() {
     var backupAction by remember { mutableStateOf<BackupAction?>(null) }
     var password by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRefresh += 1
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     fun refreshRegions() = graph.offlineMapManager.list { regions = it }
 
@@ -107,18 +121,16 @@ fun SettingsScreen() {
     val foregroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
-        if (has(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
-            has(context, Manifest.permission.ACCESS_COARSE_LOCATION)
+        permissionRefresh += 1
+        if (has(context, Manifest.permission.ACCESS_FINE_LOCATION, permissionRefresh) ||
+            has(context, Manifest.permission.ACCESS_COARSE_LOCATION, permissionRefresh)
         ) {
             TrackingService.start(context)
         }
     }
-    val backgroundLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) {}
     val sensitiveLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) {}
+    ) { permissionRefresh += 1 }
     val createBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri ->
@@ -213,7 +225,7 @@ fun SettingsScreen() {
                 PermissionActionRow(
                     Icons.Rounded.LocationOn,
                     "정밀 위치",
-                    has(context, Manifest.permission.ACCESS_FINE_LOCATION),
+                    has(context, Manifest.permission.ACCESS_FINE_LOCATION, permissionRefresh),
                 ) {
                     foregroundLauncher.launch(
                         buildList {
@@ -228,12 +240,20 @@ fun SettingsScreen() {
                 PermissionActionRow(
                     Icons.Rounded.MyLocation,
                     "백그라운드 위치",
-                    has(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION),
-                ) { backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) }
+                    has(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION, permissionRefresh),
+                ) {
+                    context.startActivity(
+                        Intent(
+                            AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                }
                 PermissionActionRow(
                     Icons.Rounded.Phone,
                     "SMS/MMS · 통화 기록",
-                    has(context, Manifest.permission.READ_SMS) && has(context, Manifest.permission.READ_CALL_LOG),
+                    has(context, Manifest.permission.READ_SMS, permissionRefresh) &&
+                        has(context, Manifest.permission.READ_CALL_LOG, permissionRefresh),
                 ) {
                     sensitiveLauncher.launch(
                         buildList {
@@ -250,15 +270,19 @@ fun SettingsScreen() {
                         }.toTypedArray(),
                     )
                 }
-                PermissionActionRow(Icons.Rounded.Notifications, "알림 접근", notificationListenerEnabled(context)) {
-                    context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                PermissionActionRow(
+                    Icons.Rounded.Notifications,
+                    "알림 접근",
+                    notificationListenerEnabled(context, permissionRefresh),
+                ) {
+                    context.startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 }
                 FilledTonalButton(
                     onClick = {
                         runCatching {
                             context.startActivity(
                                 Intent(
-                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                                     Uri.parse("package:${context.packageName}"),
                                 ),
                             )
@@ -497,7 +521,13 @@ private fun PermissionActionRow(
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(25.dp),
         )
-        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(start = 12.dp).weight(1f))
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier
+                .padding(start = 12.dp)
+                .weight(1f),
+        )
         if (granted) {
             Text("허용됨", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
         } else {
@@ -530,12 +560,16 @@ private fun downloadStateText(state: OfflineDownloadState): String = when (state
     is OfflineDownloadState.Failed -> "실패: ${state.message}"
 }
 
-private fun has(context: android.content.Context, permission: String): Boolean =
-    ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+private fun has(context: android.content.Context, permission: String, refresh: Int): Boolean {
+    refresh.hashCode()
+    return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+}
 
-private fun notificationListenerEnabled(context: android.content.Context): Boolean =
-    Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+private fun notificationListenerEnabled(context: android.content.Context, refresh: Int): Boolean {
+    refresh.hashCode()
+    return AndroidSettings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
         .orEmpty()
         .contains(context.packageName)
+}
 
 private enum class BackupAction { EXPORT, RESTORE }

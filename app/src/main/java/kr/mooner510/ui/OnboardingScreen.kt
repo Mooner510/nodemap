@@ -29,7 +29,6 @@ import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Message
 import androidx.compose.material.icons.rounded.Notifications
-import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -71,9 +70,6 @@ fun OnboardingScreen() {
     val foregroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { refresh += 1 }
-    val backgroundLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { refresh += 1 }
     val sensitiveLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { refresh += 1 }
@@ -91,6 +87,7 @@ fun OnboardingScreen() {
     val sensitiveGranted = hasPermission(context, Manifest.permission.READ_SMS, refresh) &&
         hasPermission(context, Manifest.permission.READ_CALL_LOG, refresh)
     val notificationAccessGranted = notificationListenerEnabled(context, refresh)
+    val canContinue = page != 1 || foregroundGranted
 
     Column(
         Modifier
@@ -135,9 +132,12 @@ fun OnboardingScreen() {
                         )
                     },
                     onBackground = {
-                        if (foregroundGranted) {
-                            backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                        }
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:${context.packageName}"),
+                            ),
+                        )
                     },
                     onSettings = {
                         context.startActivity(
@@ -191,6 +191,14 @@ fun OnboardingScreen() {
             Spacer(Modifier.height(28.dp))
         }
 
+        if (!canContinue) {
+            Text(
+                "NodeMap의 기본 기록을 시작하려면 위치 권한이 필요합니다.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -226,6 +234,7 @@ fun OnboardingScreen() {
                         }
                     }
                 },
+                enabled = canContinue,
             ) {
                 Text(if (page == 3) "NodeMap 시작" else "다음")
                 Icon(
@@ -233,7 +242,7 @@ fun OnboardingScreen() {
                     contentDescription = null,
                     modifier = Modifier
                         .padding(start = 8.dp)
-                        .size(20.dp),
+                        .size(21.dp),
                 )
             }
         }
@@ -266,20 +275,20 @@ private fun LocationPermissionPage(
     OnboardingHero(
         icon = Icons.Rounded.LocationOn,
         title = "위치 기록을\n먼저 준비할게요",
-        description = "화면을 닫아도 이동 경로를 계속 남기려면 정밀 위치와 백그라운드 위치 권한이 필요합니다.",
+        description = "정밀 위치는 기본 기록에 필요합니다. ‘항상 허용’까지 설정하면 재부팅 후 복구와 장시간 백그라운드 기록이 더 안정적입니다.",
     )
     Spacer(Modifier.height(24.dp))
     RoundedSection {
         PermissionStep(
             title = "정밀 위치",
-            description = "현재 위치와 이동 경로 기록",
+            description = "현재 위치와 이동 경로 기록 · 필수",
             granted = foregroundGranted,
             actionText = "허용",
             onClick = onForeground,
         )
         PermissionStep(
             title = "항상 위치 허용",
-            description = "앱을 사용하지 않을 때도 기록",
+            description = "권한 > 위치에서 ‘항상 허용’ 선택",
             granted = backgroundGranted,
             enabled = foregroundGranted,
             actionText = "설정",
@@ -339,7 +348,7 @@ private fun FinishPage(
     OnboardingHero(
         icon = Icons.Rounded.CheckCircle,
         title = "준비가 끝났어요",
-        description = "위치 권한이 있으면 시작과 동시에 기록을 시작합니다. 빠진 권한은 나중에 설정 화면에서 언제든 추가할 수 있습니다.",
+        description = "위치 권한이 있으므로 시작과 동시에 기록합니다. 선택 권한은 나중에 설정 화면에서 언제든 추가할 수 있습니다.",
     )
     Spacer(Modifier.height(24.dp))
     RoundedSection {
