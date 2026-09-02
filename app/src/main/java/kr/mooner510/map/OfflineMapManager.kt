@@ -2,6 +2,8 @@ package kr.mooner510.map
 
 import android.content.Context
 import kr.mooner510.data.PreferencesStore
+import kr.mooner510.data.TrackPoint
+import kr.mooner510.data.dayKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
@@ -11,7 +13,9 @@ import org.maplibre.android.offline.OfflineRegion
 import org.maplibre.android.offline.OfflineRegionError
 import org.maplibre.android.offline.OfflineRegionStatus
 import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
+import java.time.LocalDate
 import java.util.UUID
+import kotlin.math.cos
 
 sealed interface OfflineDownloadState {
     data object Idle : OfflineDownloadState
@@ -21,7 +25,6 @@ sealed interface OfflineDownloadState {
         val required: Long,
         val bytes: Long,
     ) : OfflineDownloadState
-
     data class Complete(val name: String, val bytes: Long) : OfflineDownloadState
     data class Failed(val message: String) : OfflineDownloadState
 }
@@ -41,6 +44,55 @@ class OfflineMapManager(
     private val manager by lazy { OfflineManager.getInstance(context) }
     private val _downloadState = MutableStateFlow<OfflineDownloadState>(OfflineDownloadState.Idle)
     val downloadState = _downloadState.asStateFlow()
+
+    suspend fun downloadTrackPeriod(
+        points: List<TrackPoint>,
+        startDay: LocalDate,
+        endDay: LocalDate,
+        paddingKm: Double = 3.0,
+    ) {
+        val grouped = points
+            .groupBy { LocalDate.parse(dayKey(it.timestamp)) }
+            .filterKeys { it in startDay..endDay }
+            .toSortedMap()
+
+        if (grouped.isEmpty()) {
+            _downloadState.value = OfflineDownloadState.Failed("선택한 기간에 저장된 위치가 없습니다.")
+            return
+        }
+
+        _downloadState.value = OfflineDownloadState.Downloading(
+            "기간 지도 준비 중",
+            0,
+            grouped.size.toLong(),
+            0,
+        )
+
+        grouped.forEach { (day, dayPoints) ->
+            val minLat = dayPoints.minOf { it.latitude }
+            val maxLat = dayPoints.maxOf { it.latitude }
+            val minLon = dayPoints.minOf { it.longitude }
+            val maxLon = dayPoints.maxOf { it.longitude }
+            val centerLat = (minLat + maxLat) / 2.0
+            val latPadding = paddingKm / 111.0
+            val lonPadding = paddingKm / (111.0 * cos(Math.toRadians(centerLat)).let { kotlin.math.abs(it) }.coerceAtLeast(0.2))
+            val label = if (grouped.size == 1) {
+                "$day 이동 범위"
+            } else {
+                "$startDay ~ $endDay · $day"
+            }
+
+            download(
+                name = label,
+                north = maxLat + latPadding,
+                east = maxLon + lonPadding,
+                south = minLat - latPadding,
+                west = minLon - lonPadding,
+                minZoom = 7.0,
+                maxZoom = 16.0,
+            )
+        }
+    }
 
     suspend fun download(
         name: String,
@@ -115,7 +167,6 @@ class OfflineMapManager(
                     callback(emptyList())
                     return
                 }
-
                 val result = mutableListOf<OfflineRegionInfo>()
                 var remaining = available.size
                 available.forEach { region ->

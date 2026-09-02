@@ -30,37 +30,19 @@ class NodeMapRepository(
     }
 
     suspend fun trackPointsForDay(date: LocalDate): List<TrackPoint> = withContext(Dispatchers.IO) {
-        val cursor = db.readableDatabase.query(
-            "track_points",
-            arrayOf("id", "timestamp", "payload"),
-            "day_key = ?",
-            arrayOf(date.toString()),
-            null,
-            null,
-            "timestamp ASC",
-        )
-        db.run {
-            cursor.mapRows {
-                decodeTrackPoint(it.getLong(0), it.getLong(1), it.getBlob(2))
-            }
-        }
+        queryTrackPoints("day_key = ?", arrayOf(date.toString()))
     }
 
-    suspend fun allTrackPoints(): List<TrackPoint> = withContext(Dispatchers.IO) {
-        val cursor = db.readableDatabase.query(
-            "track_points",
-            arrayOf("id", "timestamp", "payload"),
-            null,
-            null,
-            null,
-            null,
-            "timestamp ASC",
-        )
-        db.run {
-            cursor.mapRows {
-                decodeTrackPoint(it.getLong(0), it.getLong(1), it.getBlob(2))
-            }
+    suspend fun trackPointsBetween(startInclusive: Long, endExclusive: Long): List<TrackPoint> =
+        withContext(Dispatchers.IO) {
+            queryTrackPoints(
+                "timestamp >= ? AND timestamp < ?",
+                arrayOf(startInclusive.toString(), endExclusive.toString()),
+            )
         }
+
+    suspend fun allTrackPoints(): List<TrackPoint> = withContext(Dispatchers.IO) {
+        queryTrackPoints(null, null)
     }
 
     suspend fun latestTrackPoint(): TrackPoint? = withContext(Dispatchers.IO) {
@@ -94,6 +76,16 @@ class NodeMapRepository(
             }
         }
 
+    suspend fun dataDays(): List<LocalDate> = withContext(Dispatchers.IO) {
+        queryDays(
+            "SELECT day_key FROM (SELECT day_key FROM track_points UNION SELECT day_key FROM events) ORDER BY day_key DESC",
+        )
+    }
+
+    suspend fun trackDays(): List<LocalDate> = withContext(Dispatchers.IO) {
+        queryDays("SELECT DISTINCT day_key FROM track_points ORDER BY day_key DESC")
+    }
+
     suspend fun insertEvent(event: TimelineEvent) = withContext(Dispatchers.IO) {
         val values = ContentValues().apply {
             put("id", event.id)
@@ -116,6 +108,14 @@ class NodeMapRepository(
     suspend fun eventsForDay(date: LocalDate): List<TimelineEvent> = withContext(Dispatchers.IO) {
         queryEvents("day_key = ?", arrayOf(date.toString()))
     }
+
+    suspend fun eventsBetween(startInclusive: Long, endExclusive: Long): List<TimelineEvent> =
+        withContext(Dispatchers.IO) {
+            queryEvents(
+                "timestamp >= ? AND timestamp < ?",
+                arrayOf(startInclusive.toString(), endExclusive.toString()),
+            )
+        }
 
     suspend fun allEvents(): List<TimelineEvent> = withContext(Dispatchers.IO) {
         queryEvents(null, null)
@@ -233,7 +233,6 @@ class NodeMapRepository(
         searchableText: String,
     ): List<NotificationRule> = notificationRules().filter { rule ->
         if (!rule.enabled || packageName !in rule.packageNames) return@filter false
-
         val excluded = rule.excludeRegex
             .takeIf { it.isNotBlank() }
             ?.let { pattern ->
@@ -241,7 +240,6 @@ class NodeMapRepository(
             }
             ?: false
         if (excluded) return@filter false
-
         val include = rule.includeRegex.takeIf { it.isNotBlank() } ?: return@filter true
         runCatching { Regex(include).containsMatchIn(searchableText) }.getOrDefault(false)
     }
@@ -334,12 +332,7 @@ class NodeMapRepository(
             put("key", key)
             put("value", value)
         }
-        db.writableDatabase.insertWithOnConflict(
-            "state",
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_REPLACE,
-        )
+        db.writableDatabase.insertWithOnConflict("state", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
     suspend fun clearForRestore() = withContext(Dispatchers.IO) {
@@ -360,6 +353,33 @@ class NodeMapRepository(
             writable.endTransaction()
         }
         _changes.tryEmit(Unit)
+    }
+
+    private fun queryTrackPoints(selection: String?, args: Array<String>?): List<TrackPoint> {
+        val cursor = db.readableDatabase.query(
+            "track_points",
+            arrayOf("id", "timestamp", "payload"),
+            selection,
+            args,
+            null,
+            null,
+            "timestamp ASC",
+        )
+        return db.run {
+            cursor.mapRows {
+                decodeTrackPoint(it.getLong(0), it.getLong(1), it.getBlob(2))
+            }
+        }
+    }
+
+    private fun queryDays(sql: String): List<LocalDate> {
+        val result = mutableListOf<LocalDate>()
+        db.readableDatabase.rawQuery(sql, null).use { cursor ->
+            while (cursor.moveToNext()) {
+                runCatching { LocalDate.parse(cursor.getString(0)) }.getOrNull()?.let(result::add)
+            }
+        }
+        return result
     }
 
     private fun queryEvents(selection: String?, args: Array<String>?): List<TimelineEvent> {

@@ -1,41 +1,783 @@
 package kr.mooner510.ui
 
+import android.Manifest
 import android.content.Intent
-import android.graphics.Color
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Paint
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.Message
+import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.Phone
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.mooner510.appGraph
-import kr.mooner510.data.*
+import kr.mooner510.data.AppSettings
+import kr.mooner510.data.AttachmentRecord
+import kr.mooner510.data.EventType
+import kr.mooner510.data.TimelineEvent
+import kr.mooner510.data.TrackPoint
 import kotlinx.coroutines.launch
+import org.maplibre.android.annotations.Icon as MapIcon
+import org.maplibre.android.annotations.IconFactory
 import org.maplibre.android.annotations.MarkerOptions
 import org.maplibre.android.annotations.PolylineOptions
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
-import java.time.*
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.absoluteValue
+import kotlin.math.roundToInt
 
-private val timeFormatter=DateTimeFormatter.ofPattern("HH:mm")
-@Composable fun TimelineScreen(){val context=LocalContext.current;val graph=context.appGraph;val scope=rememberCoroutineScope();val settings by graph.preferences.settings.collectAsStateWithLifecycle(initialValue=AppSettings());var date by remember{mutableStateOf(LocalDate.now())};var points by remember{mutableStateOf(emptyList<TrackPoint>())};var events by remember{mutableStateOf(emptyList<TimelineEvent>())};var selectedTime by remember{mutableLongStateOf(System.currentTimeMillis())};var pin by remember{mutableStateOf(false)};suspend fun reload(){points=graph.repository.trackPointsForDay(date);events=graph.repository.eventsForDay(date);val z=ZoneId.systemDefault();val start=date.atStartOfDay(z).toInstant().toEpochMilli();val end=date.plusDays(1).atStartOfDay(z).toInstant().toEpochMilli()-1;selectedTime=if(date==LocalDate.now())System.currentTimeMillis().coerceIn(start,end) else end};LaunchedEffect(date){reload()};LaunchedEffect(Unit){graph.repository.changes.collect{reload()}};Box(Modifier.fillMaxSize()){Column(Modifier.fillMaxSize()){Row(Modifier.fillMaxWidth().padding(12.dp),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically){TextButton({date=date.minusDays(1)}){Text("‹")};Text(date.toString());TextButton({date=date.plusDays(1).coerceAtMost(LocalDate.now())}){Text("›")}};TimelineMap(Modifier.weight(1f).fillMaxWidth(),points,events,selectedTime,settings.mapStyleUri);SelectedEventStrip(events,selectedTime);TimeRuler(date,selectedTime,events){selectedTime=it}};FloatingActionButton({pin=true},Modifier.align(Alignment.BottomEnd).padding(20.dp)){Text("＋")}};if(pin)ManualPinDialog({pin=false}){text->scope.launch{val now=System.currentTimeMillis();val p=graph.repository.latestTrackPoint()?.takeIf{now-it.timestamp<=300000};graph.repository.insertEvent(TimelineEvent(timestamp=now,type=EventType.PIN_MANUAL,latitude=p?.latitude,longitude=p?.longitude,title="압정",body=text,source="MANUAL"));pin=false}}}
-@Composable private fun TimelineMap(modifier:Modifier,points:List<TrackPoint>,events:List<TimelineEvent>,selectedTime:Long,styleUri:String){val context=LocalContext.current;val relevant=remember(events,selectedTime){events.filter{(it.timestamp-selectedTime).absoluteValue<=90000&&it.latitude!=null&&it.longitude!=null}};AndroidView(modifier=modifier,factory={MapView(context).apply{onCreate(null);onStart();getMapAsync{it.setStyle(styleUri)}}},update={v->v.getMapAsync{m->if(m.style==null)m.setStyle(styleUri){drawTimeline(m,points,relevant,selectedTime)}else drawTimeline(m,points,relevant,selectedTime)}})}
-private fun drawTimeline(map:org.maplibre.android.maps.MapLibreMap,points:List<TrackPoint>,events:List<TimelineEvent>,selectedTime:Long){map.clear();val twelve=points.filter{it.timestamp in(selectedTime-12*60*60_000L)..selectedTime};val old=twelve.filter{it.timestamp<selectedTime-2*60*60_000L};val recent=twelve.filter{it.timestamp>=selectedTime-2*60*60_000L};splitAtGaps(old).forEach{s->if(s.size>=2)map.addPolyline(PolylineOptions().addAll(s.map{LatLng(it.latitude,it.longitude)}).color(Color.argb(75,40,110,220)).width(5f))};splitAtGaps(recent).forEach{s->if(s.size>=2)map.addPolyline(PolylineOptions().addAll(s.map{LatLng(it.latitude,it.longitude)}).color(Color.rgb(35,105,235)).width(7f))};points.minByOrNull{(it.timestamp-selectedTime).absoluteValue}?.takeIf{(it.timestamp-selectedTime).absoluteValue<=600000}?.let{map.addMarker(MarkerOptions().position(LatLng(it.latitude,it.longitude)).title("선택 시각 ${formatTime(selectedTime)}"));if(twelve.isNotEmpty())map.animateCamera(CameraUpdateFactory.newLatLng(LatLng(it.latitude,it.longitude)))};events.forEach{map.addMarker(MarkerOptions().position(LatLng(it.latitude!!,it.longitude!!)).title(it.title).snippet(it.body?:formatTime(it.timestamp)))}}
-private fun splitAtGaps(points:List<TrackPoint>,maxGapMs:Long=300000):List<List<TrackPoint>>{if(points.isEmpty())return emptyList();val out=mutableListOf<MutableList<TrackPoint>>();var current=mutableListOf(points.first());out+=current;for(p in points.drop(1)){if(p.timestamp-current.last().timestamp>maxGapMs){current=mutableListOf();out+=current};current+=p};return out}
-@Composable private fun TimeRuler(date:LocalDate,selectedTime:Long,events:List<TimelineEvent>,onTime:(Long)->Unit){val z=ZoneId.systemDefault();val start=date.atStartOfDay(z).toInstant().toEpochMilli();val end=date.plusDays(1).atStartOfDay(z).toInstant().toEpochMilli()-1;Column(Modifier.fillMaxWidth().padding(bottom=8.dp)){Text(formatTime(selectedTime),Modifier.align(Alignment.CenterHorizontally));Canvas(Modifier.fillMaxWidth().height(82.dp).pointerInput(start,end,selectedTime){detectDragGestures{change,drag->change.consume();val delta=(-drag.x/size.width.toFloat()*6*60*60_000L).toLong();onTime((selectedTime+delta).coerceIn(start,end))}}){val center=size.width/2f;val ppm=size.width/(6f*60f);val minute=selectedTime/60000L;for(o in -180..180 step 5){val x=center+o*ppm;val abs=minute+o;val major=abs%60L==0L;val half=abs%30L==0L;val h=if(major)32f else if(half)22f else 12f;drawLine(androidx.compose.ui.graphics.Color.Gray,Offset(x,size.height-h),Offset(x,size.height),if(major)2f else 1f)};events.forEach{val d=(it.timestamp-selectedTime)/60000f;if(d in -180f..180f)drawCircle(androidx.compose.ui.graphics.Color(0xFFEF5350),5f,Offset(center+d*ppm,12f))};drawLine(androidx.compose.ui.graphics.Color.Black,Offset(center,0f),Offset(center,size.height),4f,StrokeCap.Round)}}}
-@Composable private fun SelectedEventStrip(events:List<TimelineEvent>,selectedTime:Long){val context=LocalContext.current;val graph=context.appGraph;val scope=rememberCoroutineScope();val nearby=remember(events,selectedTime){events.filter{(it.timestamp-selectedTime).absoluteValue<=90000}.sortedBy{(it.timestamp-selectedTime).absoluteValue}};var detail by remember{mutableStateOf<TimelineEvent?>(null)};nearby.firstOrNull()?.let{e->Card(Modifier.fillMaxWidth().padding(12.dp,4.dp).clickable{detail=e}){Column(Modifier.padding(12.dp)){Text("📌 ${e.title} · ${formatTime(e.timestamp)}");e.body?.let{Text(it,maxLines=2)};if(nearby.size>1)Text("같은 시각 주변 기록 ${nearby.size}개")}}};detail?.let{e->var attachments by remember(e.id){mutableStateOf(emptyList<AttachmentRecord>())};LaunchedEffect(e.id){attachments=graph.repository.attachmentsForEvent(e.id)};AlertDialog({detail=null},title={Text(e.title)},text={Column{Text(formatTime(e.timestamp));e.body?.let{Text(it)};attachments.forEach{a->if(!a.externalUri.isNullOrBlank())Row(verticalAlignment=Alignment.CenterVertically){Text(a.kind,Modifier.weight(1f));TextButton({runCatching{context.startActivity(Intent(Intent.ACTION_VIEW).apply{setDataAndType(Uri.parse(a.externalUri),a.mimeType?:"audio/*");addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)})}}){Text("열기")};TextButton({scope.launch{runCatching{context.contentResolver.openInputStream(Uri.parse(a.externalUri))?.use{graph.repository.addEncryptedAttachment(e.id,"${a.kind}_IMPORTED",a.mimeType,it)}};attachments=graph.repository.attachmentsForEvent(e.id)}}){Text("보관")}}else Text("${a.kind} · 암호화 보관됨")}}},confirmButton={TextButton({detail=null}){Text("닫기")}})}}
-@Composable private fun ManualPinDialog(onDismiss:()->Unit,onSave:(String)->Unit){var text by remember{mutableStateOf("")};AlertDialog(onDismiss,title={Text("현재 위치에 압정")},text={OutlinedTextField(text,{text=it},label={Text("기록")},minLines=3)},confirmButton={Button({onSave(text.trim())},enabled=text.isNotBlank()){Text("기록")}},dismissButton={TextButton(onDismiss){Text("취소")}})}
-private fun formatTime(ms:Long)=Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).format(timeFormatter)
+private const val HOUR_MS = 60 * 60_000L
+private const val SCRUBBER_WINDOW_MS = 6 * HOUR_MS
+private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+private val dateFormatter = DateTimeFormatter.ofPattern("M월 d일 EEEE", Locale.KOREAN)
+
+@Composable
+fun TimelineScreen() {
+    val context = LocalContext.current
+    val graph = context.appGraph
+    val scope = rememberCoroutineScope()
+    val settings by graph.preferences.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    var selectedTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var points by remember { mutableStateOf(emptyList<TrackPoint>()) }
+    var events by remember { mutableStateOf(emptyList<TimelineEvent>()) }
+    var latestPoint by remember { mutableStateOf<TrackPoint?>(null) }
+    var availableDays by remember { mutableStateOf(emptyList<LocalDate>()) }
+    var dayPickerOpen by remember { mutableStateOf(false) }
+    var manualPinOpen by remember { mutableStateOf(false) }
+
+    val selectedDate = remember(selectedTime) { selectedTime.toLocalDate() }
+    val selectedDateState = rememberUpdatedState(selectedDate)
+
+    suspend fun reload(day: LocalDate) {
+        val zone = ZoneId.systemDefault()
+        val start = day.minusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = day.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
+        points = graph.repository.trackPointsBetween(start, end)
+        events = graph.repository.eventsBetween(start, end)
+        latestPoint = graph.repository.latestTrackPoint()
+        availableDays = graph.repository.dataDays()
+    }
+
+    LaunchedEffect(selectedDate) { reload(selectedDate) }
+    LaunchedEffect(Unit) {
+        graph.repository.changes.collect { reload(selectedDateState.value) }
+    }
+
+    val now = System.currentTimeMillis()
+    val historyStart = availableDays.minOrNull()
+        ?.atStartOfDay(ZoneId.systemDefault())
+        ?.toInstant()
+        ?.toEpochMilli()
+        ?: (now - 12 * HOUR_MS)
+    val historyEnd = now
+
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            TimelineDateHeader(
+                date = selectedDate,
+                hasSelectableDays = availableDays.isNotEmpty(),
+                onClick = { dayPickerOpen = true },
+            )
+
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .clip(RoundedCornerShape(28.dp)),
+            ) {
+                TimelineMap(
+                    modifier = Modifier.fillMaxSize(),
+                    points = points,
+                    events = events,
+                    selectedTime = selectedTime,
+                    selectedDate = selectedDate,
+                    latestPoint = latestPoint,
+                    styleUri = settings.mapStyleUri,
+                )
+                TrackingStatusPill(
+                    settings = settings,
+                    latestPoint = latestPoint,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp),
+                )
+                if ((now - selectedTime).absoluteValue > 5 * 60_000L) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp)
+                            .clickable { selectedTime = System.currentTimeMillis() },
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                        shadowElevation = 3.dp,
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Rounded.MyLocation,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                "지금",
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.padding(start = 5.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            SelectedEventStrip(events, selectedTime)
+            TimelineScrubber(
+                selectedTime = selectedTime,
+                events = events,
+                rangeStart = historyStart,
+                rangeEnd = historyEnd,
+                onTime = { selectedTime = it },
+            )
+        }
+
+        FloatingActionButton(
+            onClick = { manualPinOpen = true },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 22.dp, bottom = 18.dp),
+            shape = RoundedCornerShape(20.dp),
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ) {
+            Icon(Icons.Rounded.Add, contentDescription = "압정 추가", modifier = Modifier.size(30.dp))
+        }
+    }
+
+    if (dayPickerOpen) {
+        AvailableDayPickerDialog(
+            availableDays = availableDays,
+            initialDay = selectedDate,
+            onDismiss = { dayPickerOpen = false },
+            onSelected = { day ->
+                dayPickerOpen = false
+                scope.launch {
+                    val dayPoints = graph.repository.trackPointsForDay(day)
+                    val dayEvents = graph.repository.eventsForDay(day)
+                    val target = (dayPoints.map { it.timestamp } + dayEvents.map { it.timestamp }).maxOrNull()
+                        ?: day.atTime(12, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                    selectedTime = target.coerceAtMost(System.currentTimeMillis())
+                }
+            },
+        )
+    }
+
+    if (manualPinOpen) {
+        ManualPinDialog(
+            onDismiss = { manualPinOpen = false },
+            onSave = { text ->
+                scope.launch {
+                    val timestamp = System.currentTimeMillis()
+                    val point = graph.repository.latestTrackPoint()
+                        ?.takeIf { timestamp - it.timestamp <= 5 * 60_000L }
+                    graph.repository.insertEvent(
+                        TimelineEvent(
+                            timestamp = timestamp,
+                            type = EventType.PIN_MANUAL,
+                            latitude = point?.latitude,
+                            longitude = point?.longitude,
+                            title = "압정",
+                            body = text,
+                            source = "MANUAL",
+                        ),
+                    )
+                    manualPinOpen = false
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun TimelineDateHeader(date: LocalDate, hasSelectableDays: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("타임랩스", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text(date.format(dateFormatter), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "아래 시간축을 드래그하면 날짜 경계를 넘어 이동합니다.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Surface(
+            modifier = Modifier
+                .size(48.dp)
+                .clickable(enabled = hasSelectableDays, onClick = onClick),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Rounded.CalendarMonth,
+                    contentDescription = "날짜 선택",
+                    tint = if (hasSelectableDays) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(26.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimelineMap(
+    modifier: Modifier,
+    points: List<TrackPoint>,
+    events: List<TimelineEvent>,
+    selectedTime: Long,
+    selectedDate: LocalDate,
+    latestPoint: TrackPoint?,
+    styleUri: String,
+) {
+    val context = LocalContext.current
+    val mapView = remember {
+        MapView(context).apply {
+            onCreate(null)
+            onStart()
+            onResume()
+        }
+    }
+    val currentIcon = remember(context) { makeDotIcon(context, 42f, android.graphics.Color.rgb(49, 130, 246)) }
+    val selectedIcon = remember(context) { makeDotIcon(context, 34f, android.graphics.Color.rgb(25, 31, 40)) }
+    val eventIcon = remember(context) { makeDotIcon(context, 30f, android.graphics.Color.rgb(240, 68, 82)) }
+    var appliedStyle by remember { mutableStateOf<String?>(null) }
+    var focusedDay by remember { mutableStateOf<LocalDate?>(null) }
+
+    DisposableEffect(mapView) {
+        onDispose {
+            mapView.onPause()
+            mapView.onStop()
+            mapView.onDestroy()
+        }
+    }
+
+    fun render(map: MapLibreMap) {
+        val focus = drawTimeline(
+            map = map,
+            points = points,
+            events = events,
+            selectedTime = selectedTime,
+            latestPoint = latestPoint,
+            currentIcon = currentIcon,
+            selectedIcon = selectedIcon,
+            eventIcon = eventIcon,
+        )
+        if (focus != null && focusedDay != selectedDate) {
+            map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(focus, 15.5),
+                350,
+            )
+            focusedDay = selectedDate
+        }
+    }
+
+    AndroidView(
+        modifier = modifier,
+        factory = { mapView },
+        update = { view ->
+            view.getMapAsync { map ->
+                if (map.style == null || appliedStyle != styleUri) {
+                    map.setStyle(styleUri) {
+                        appliedStyle = styleUri
+                        focusedDay = null
+                        render(map)
+                    }
+                } else {
+                    render(map)
+                }
+            }
+        },
+    )
+}
+
+private fun drawTimeline(
+    map: MapLibreMap,
+    points: List<TrackPoint>,
+    events: List<TimelineEvent>,
+    selectedTime: Long,
+    latestPoint: TrackPoint?,
+    currentIcon: MapIcon,
+    selectedIcon: MapIcon,
+    eventIcon: MapIcon,
+): LatLng? {
+    map.clear()
+    val twelveHours = points.filter { it.timestamp in (selectedTime - 12 * HOUR_MS)..selectedTime }
+    val old = twelveHours.filter { it.timestamp < selectedTime - 2 * HOUR_MS }
+    val recent = twelveHours.filter { it.timestamp >= selectedTime - 2 * HOUR_MS }
+
+    splitAtGaps(old).forEach { segment ->
+        if (segment.size >= 2) {
+            map.addPolyline(
+                PolylineOptions()
+                    .addAll(segment.map { LatLng(it.latitude, it.longitude) })
+                    .color(android.graphics.Color.argb(85, 49, 130, 246))
+                    .width(6f),
+            )
+        }
+    }
+    splitAtGaps(recent).forEach { segment ->
+        if (segment.size >= 2) {
+            map.addPolyline(
+                PolylineOptions()
+                    .addAll(segment.map { LatLng(it.latitude, it.longitude) })
+                    .color(android.graphics.Color.rgb(49, 130, 246))
+                    .width(9f),
+            )
+        }
+    }
+
+    val selectedPoint = points
+        .minByOrNull { (it.timestamp - selectedTime).absoluteValue }
+        ?.takeIf { (it.timestamp - selectedTime).absoluteValue <= 10 * 60_000L }
+
+    latestPoint?.let { point ->
+        map.addMarker(
+            MarkerOptions()
+                .position(LatLng(point.latitude, point.longitude))
+                .icon(currentIcon)
+                .title("현재 위치")
+                .snippet("마지막 기록 ${formatTime(point.timestamp)} · ±${point.accuracyMeters.roundToInt()}m"),
+        )
+    }
+
+    selectedPoint
+        ?.takeIf { latestPoint == null || (it.timestamp - latestPoint.timestamp).absoluteValue > 60_000L }
+        ?.let { point ->
+            map.addMarker(
+                MarkerOptions()
+                    .position(LatLng(point.latitude, point.longitude))
+                    .icon(selectedIcon)
+                    .title("선택 시각 ${formatTime(selectedTime)}"),
+            )
+        }
+
+    events
+        .filter {
+            (it.timestamp - selectedTime).absoluteValue <= 90_000L &&
+                it.latitude != null && it.longitude != null
+        }
+        .forEach { event ->
+            map.addMarker(
+                MarkerOptions()
+                    .position(LatLng(event.latitude!!, event.longitude!!))
+                    .icon(eventIcon)
+                    .title(event.title)
+                    .snippet(event.body ?: formatTime(event.timestamp)),
+            )
+        }
+
+    return selectedPoint?.let { LatLng(it.latitude, it.longitude) }
+        ?: latestPoint?.let { LatLng(it.latitude, it.longitude) }
+        ?: points.lastOrNull()?.let { LatLng(it.latitude, it.longitude) }
+}
+
+private fun splitAtGaps(points: List<TrackPoint>, maxGapMs: Long = 300_000L): List<List<TrackPoint>> {
+    if (points.isEmpty()) return emptyList()
+    val result = mutableListOf<MutableList<TrackPoint>>()
+    var current = mutableListOf(points.first())
+    result += current
+    for (point in points.drop(1)) {
+        if (point.timestamp - current.last().timestamp > maxGapMs) {
+            current = mutableListOf()
+            result += current
+        }
+        current += point
+    }
+    return result
+}
+
+@Composable
+private fun TrackingStatusPill(
+    settings: AppSettings,
+    latestPoint: TrackPoint?,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+        PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+        PackageManager.PERMISSION_GRANTED
+    val age = latestPoint?.let { System.currentTimeMillis() - it.timestamp }
+    val active = settings.trackingEnabled && hasPermission
+    val text = when {
+        !hasPermission -> "위치 권한 필요"
+        !settings.trackingEnabled -> "위치 기록 꺼짐"
+        latestPoint == null -> "현재 위치 찾는 중"
+        age != null && age < 2 * 60_000L -> "기록 중 · ±${latestPoint.accuracyMeters.roundToInt()}m"
+        else -> "마지막 기록 ${formatAge(age ?: 0L)} 전"
+    }
+    val dotColor = when {
+        active && latestPoint != null && (age ?: Long.MAX_VALUE) < 2 * 60_000L -> Color(0xFF19A15F)
+        active -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.error
+    }
+
+    Surface(
+        modifier = modifier,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+        shadowElevation = 3.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(shape = CircleShape, color = dotColor, modifier = Modifier.size(9.dp)) {}
+            Text(
+                text,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(start = 7.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TimelineScrubber(
+    selectedTime: Long,
+    events: List<TimelineEvent>,
+    rangeStart: Long,
+    rangeEnd: Long,
+    onTime: (Long) -> Unit,
+) {
+    val selectedState = rememberUpdatedState(selectedTime)
+    val onTimeState = rememberUpdatedState(onTime)
+    val primary = MaterialTheme.colorScheme.primary
+    val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
+    val eventColor = MaterialTheme.colorScheme.error
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(Modifier.padding(top = 12.dp, bottom = 8.dp)) {
+            Text(
+                formatTime(selectedTime),
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            )
+            Text(
+                "좌우로 드래그",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(top = 1.dp),
+            )
+            Canvas(
+                Modifier
+                    .fillMaxWidth()
+                    .height(86.dp)
+                    .pointerInput(rangeStart, rangeEnd) {
+                        var dragStartTime = selectedState.value
+                        var totalDrag = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = {
+                                dragStartTime = selectedState.value
+                                totalDrag = 0f
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                totalDrag += dragAmount
+                                val millisPerPixel = SCRUBBER_WINDOW_MS.toDouble() / size.width.toDouble()
+                                val target = (dragStartTime - totalDrag * millisPerPixel)
+                                    .toLong()
+                                    .coerceIn(rangeStart, rangeEnd)
+                                onTimeState.value(target)
+                            },
+                        )
+                    },
+            ) {
+                val center = size.width / 2f
+                val pixelsPerMinute = size.width / (6f * 60f)
+                val centerMinute = selectedTime / 60_000L
+                for (offsetMinutes in -180..180 step 5) {
+                    val x = center + offsetMinutes * pixelsPerMinute
+                    val absoluteMinute = centerMinute + offsetMinutes
+                    val major = absoluteMinute % 60L == 0L
+                    val half = absoluteMinute % 30L == 0L
+                    val height = if (major) 34f else if (half) 24f else 13f
+                    drawLine(
+                        color = tickColor,
+                        start = Offset(x, size.height - height),
+                        end = Offset(x, size.height),
+                        strokeWidth = if (major) 2.4f else 1.4f,
+                        cap = StrokeCap.Round,
+                    )
+                }
+                events.forEach { event ->
+                    val deltaMinutes = (event.timestamp - selectedTime) / 60_000f
+                    if (deltaMinutes in -180f..180f) {
+                        drawCircle(
+                            color = eventColor,
+                            radius = 6f,
+                            center = Offset(center + deltaMinutes * pixelsPerMinute, 13f),
+                        )
+                    }
+                }
+                drawLine(
+                    color = primary,
+                    start = Offset(center, 3f),
+                    end = Offset(center, size.height),
+                    strokeWidth = 5f,
+                    cap = StrokeCap.Round,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedEventStrip(events: List<TimelineEvent>, selectedTime: Long) {
+    val context = LocalContext.current
+    val graph = context.appGraph
+    val scope = rememberCoroutineScope()
+    val nearby = remember(events, selectedTime) {
+        events
+            .filter { (it.timestamp - selectedTime).absoluteValue <= 90_000L }
+            .sortedBy { (it.timestamp - selectedTime).absoluteValue }
+    }
+    var detail by remember { mutableStateOf<TimelineEvent?>(null) }
+
+    nearby.firstOrNull()?.let { event ->
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 7.dp)
+                .clickable { detail = event },
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Row(
+                Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                    Icon(
+                        eventIcon(event.type),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(10.dp)
+                            .size(24.dp),
+                    )
+                }
+                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                    Text("${event.title} · ${formatTime(event.timestamp)}", style = MaterialTheme.typography.titleMedium)
+                    event.body?.let {
+                        Text(
+                            it,
+                            maxLines = 2,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (nearby.size > 1) {
+                        Text(
+                            "이 시각 주변 기록 ${nearby.size}개",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    detail?.let { event ->
+        var attachments by remember(event.id) { mutableStateOf(emptyList<AttachmentRecord>()) }
+        LaunchedEffect(event.id) { attachments = graph.repository.attachmentsForEvent(event.id) }
+        AlertDialog(
+            onDismissRequest = { detail = null },
+            title = { Text(event.title) },
+            text = {
+                Column {
+                    Text(formatTime(event.timestamp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    event.body?.let { Text(it, modifier = Modifier.padding(top = 8.dp)) }
+                    attachments.forEach { attachment ->
+                        if (!attachment.externalUri.isNullOrBlank()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(attachment.kind, Modifier.weight(1f))
+                                TextButton(
+                                    onClick = {
+                                        runCatching {
+                                            context.startActivity(
+                                                Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(
+                                                        Uri.parse(attachment.externalUri),
+                                                        attachment.mimeType ?: "audio/*",
+                                                    )
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                },
+                                            )
+                                        }
+                                    },
+                                ) { Text("열기") }
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            runCatching {
+                                                context.contentResolver
+                                                    .openInputStream(Uri.parse(attachment.externalUri))
+                                                    ?.use {
+                                                        graph.repository.addEncryptedAttachment(
+                                                            event.id,
+                                                            "${attachment.kind}_IMPORTED",
+                                                            attachment.mimeType,
+                                                            it,
+                                                        )
+                                                    }
+                                            }
+                                            attachments = graph.repository.attachmentsForEvent(event.id)
+                                        }
+                                    },
+                                ) { Text("보관") }
+                            }
+                        } else {
+                            Text("${attachment.kind} · 암호화 보관됨")
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { detail = null }) { Text("닫기") } },
+        )
+    }
+}
+
+@Composable
+private fun ManualPinDialog(onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("현재 위치에 압정") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("기록") },
+                minLines = 3,
+            )
+        },
+        confirmButton = {
+            Button(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank()) { Text("기록") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } },
+    )
+}
+
+private fun eventIcon(type: EventType): ImageVector = when (type) {
+    EventType.PHONE_CALL -> Icons.Rounded.Phone
+    EventType.SMS, EventType.MMS -> Icons.Rounded.Message
+    EventType.NOTIFICATION -> Icons.Rounded.Notifications
+    else -> Icons.Rounded.PushPin
+}
+
+private fun makeDotIcon(
+    context: android.content.Context,
+    sizeDp: Float,
+    fillColor: Int,
+): MapIcon {
+    val px = (sizeDp * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    val center = px / 2f
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(center, center, px * 0.49f, paint)
+    paint.color = fillColor
+    canvas.drawCircle(center, center, px * 0.36f, paint)
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(center, center, px * 0.13f, paint)
+    return IconFactory.getInstance(context).fromBitmap(bitmap)
+}
+
+private fun Long.toLocalDate(): LocalDate =
+    Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault()).toLocalDate()
+
+private fun formatTime(timestamp: Long): String =
+    Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(timeFormatter)
+
+private fun formatAge(milliseconds: Long): String = when {
+    milliseconds < 60_000L -> "${(milliseconds / 1_000L).coerceAtLeast(1)}초"
+    milliseconds < HOUR_MS -> "${milliseconds / 60_000L}분"
+    else -> "${milliseconds / HOUR_MS}시간"
+}
