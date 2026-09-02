@@ -43,6 +43,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -87,6 +88,7 @@ import kotlin.math.roundToInt
 
 private const val HOUR_MS = 60 * 60_000L
 private const val SCRUBBER_WINDOW_MS = 6 * HOUR_MS
+private const val SCRUBBER_TICK_MS = 5 * 60_000L
 private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val dateFormatter = DateTimeFormatter.ofPattern("M월 d일 EEEE", Locale.KOREAN)
 
@@ -103,6 +105,7 @@ fun TimelineScreen() {
     var availableDays by remember { mutableStateOf(emptyList<LocalDate>()) }
     var dayPickerOpen by remember { mutableStateOf(false) }
     var manualPinOpen by remember { mutableStateOf(false) }
+    var currentLocationFocusRequest by remember { mutableIntStateOf(0) }
 
     val selectedDate = remember(selectedTime) { selectedTime.toLocalDate() }
     val selectedDateState = rememberUpdatedState(selectedDate)
@@ -153,6 +156,7 @@ fun TimelineScreen() {
                     selectedDate = selectedDate,
                     latestPoint = latestPoint,
                     styleUri = settings.mapStyleUri,
+                    currentLocationFocusRequest = currentLocationFocusRequest,
                 )
                 TrackingStatusPill(
                     settings = settings,
@@ -187,6 +191,23 @@ fun TimelineScreen() {
                                 modifier = Modifier.padding(start = 4.dp),
                             )
                         }
+                    }
+                }
+                if (latestPoint != null) {
+                    SmallFloatingActionButton(
+                        onClick = { currentLocationFocusRequest += 1 },
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(10.dp),
+                        shape = CircleShape,
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ) {
+                        Icon(
+                            Icons.Rounded.MyLocation,
+                            contentDescription = "현재 위치로 이동",
+                            modifier = Modifier.size(22.dp),
+                        )
                     }
                 }
                 SmallFloatingActionButton(
@@ -314,6 +335,7 @@ private fun TimelineMap(
     selectedDate: LocalDate,
     latestPoint: TrackPoint?,
     styleUri: String,
+    currentLocationFocusRequest: Int,
 ) {
     val context = LocalContext.current
     val mapView = remember {
@@ -328,6 +350,7 @@ private fun TimelineMap(
     val eventIcon = remember(context) { makeDotIcon(context, 27f, android.graphics.Color.rgb(240, 68, 82)) }
     var appliedStyle by remember { mutableStateOf<String?>(null) }
     var focusedDay by remember { mutableStateOf<LocalDate?>(null) }
+    var handledCurrentLocationFocusRequest by remember { mutableIntStateOf(0) }
 
     DisposableEffect(mapView) {
         onDispose {
@@ -351,6 +374,19 @@ private fun TimelineMap(
         if (focus != null && focusedDay != selectedDate) {
             map.animateCamera(CameraUpdateFactory.newLatLngZoom(focus, 15.5), 350)
             focusedDay = selectedDate
+        }
+        if (
+            latestPoint != null &&
+            currentLocationFocusRequest != handledCurrentLocationFocusRequest
+        ) {
+            map.animateCamera(
+                CameraUpdateFactory.newLatLngZoom(
+                    LatLng(latestPoint.latitude, latestPoint.longitude),
+                    15.5,
+                ),
+                350,
+            )
+            handledCurrentLocationFocusRequest = currentLocationFocusRequest
         }
     }
 
@@ -544,6 +580,8 @@ private fun TimelineScrubber(
     val primary = MaterialTheme.colorScheme.primary
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
     val eventColor = MaterialTheme.colorScheme.error
+    val pinColor = MaterialTheme.colorScheme.primary
+    val pinCenterColor = MaterialTheme.colorScheme.surface
 
     LaunchedEffect(selectedTime, dragging) {
         if (!dragging) previewTime = selectedTime
@@ -601,32 +639,65 @@ private fun TimelineScrubber(
                     ),
             ) {
                 val center = size.width / 2f
-                val pixelsPerMinute = size.width / (6f * 60f)
-                val centerMinute = displayTime / 60_000L
-                for (offsetMinutes in -180..180 step 5) {
-                    val x = center + offsetMinutes * pixelsPerMinute
-                    val absoluteMinute = centerMinute + offsetMinutes
+                val halfWindow = SCRUBBER_WINDOW_MS / 2L
+                val visibleStart = displayTime - halfWindow
+                val visibleEnd = displayTime + halfWindow
+                var tickTime = Math.floorDiv(visibleStart, SCRUBBER_TICK_MS) * SCRUBBER_TICK_MS
+
+                while (tickTime <= visibleEnd + SCRUBBER_TICK_MS) {
+                    val x = center + (
+                        (tickTime - displayTime).toDouble() /
+                            SCRUBBER_WINDOW_MS.toDouble() * size.width.toDouble()
+                        ).toFloat()
+                    val absoluteMinute = Math.floorDiv(tickTime, 60_000L)
                     val major = absoluteMinute % 60L == 0L
                     val half = absoluteMinute % 30L == 0L
-                    val height = if (major) 30f else if (half) 21f else 11f
+                    val tickHeight = if (major) 30f else if (half) 21f else 11f
                     drawLine(
                         color = tickColor,
-                        start = Offset(x, size.height - height),
+                        start = Offset(x, size.height - tickHeight),
                         end = Offset(x, size.height),
                         strokeWidth = if (major) 2.2f else 1.3f,
                         cap = StrokeCap.Round,
                     )
+                    tickTime += SCRUBBER_TICK_MS
                 }
+
                 events.forEach { event ->
-                    val deltaMinutes = (event.timestamp - displayTime) / 60_000f
-                    if (deltaMinutes in -180f..180f) {
-                        drawCircle(
-                            color = eventColor,
-                            radius = 5f,
-                            center = Offset(center + deltaMinutes * pixelsPerMinute, 11f),
-                        )
+                    val delta = event.timestamp - displayTime
+                    if (delta in -halfWindow..halfWindow) {
+                        val x = center + (
+                            delta.toDouble() /
+                                SCRUBBER_WINDOW_MS.toDouble() * size.width.toDouble()
+                            ).toFloat()
+                        if (event.type == EventType.PIN_MANUAL || event.type == EventType.PIN_ROUTINE) {
+                            drawLine(
+                                color = pinColor,
+                                start = Offset(x, 10f),
+                                end = Offset(x, 27f),
+                                strokeWidth = 2.4f,
+                                cap = StrokeCap.Round,
+                            )
+                            drawCircle(
+                                color = pinColor,
+                                radius = 6.5f,
+                                center = Offset(x, 10f),
+                            )
+                            drawCircle(
+                                color = pinCenterColor,
+                                radius = 2.2f,
+                                center = Offset(x, 10f),
+                            )
+                        } else {
+                            drawCircle(
+                                color = eventColor,
+                                radius = 4.5f,
+                                center = Offset(x, 11f),
+                            )
+                        }
                     }
                 }
+
                 drawLine(
                     color = primary,
                     start = Offset(center, 3f),
