@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -67,6 +68,7 @@ fun NodeMapApp() {
             listOf(
                 MainTab("타임랩스", Icons.Rounded.Map),
                 MainTab("압정", Icons.Rounded.PushPin),
+                MainTab("규칙", Icons.Rounded.Tune),
                 MainTab("설정", Icons.Rounded.Settings),
             )
         }
@@ -82,14 +84,11 @@ fun NodeMapApp() {
                 )
             },
         ) { padding ->
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            ) {
+            Box(Modifier.fillMaxSize().padding(padding)) {
                 when (selectedTab) {
                     0 -> TimelineScreen()
-                    1 -> PinsAndRulesScreen()
+                    1 -> PinListScreen()
+                    2 -> PinRulesScreen()
                     else -> SettingsScreen()
                 }
             }
@@ -104,28 +103,20 @@ private fun NodeBottomBar(
     onSelected: (Int) -> Unit,
 ) {
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 7.dp,
     ) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .height(62.dp)
-                .padding(5.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            Modifier.fillMaxWidth().height(62.dp).padding(5.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             tabs.forEachIndexed { index, tab ->
                 val active = selected == index
                 Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(52.dp)
-                        .clickable { onSelected(index) },
-                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.weight(1f).height(52.dp).clickable { onSelected(index) },
+                    shape = RoundedCornerShape(17.dp),
                     color = if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
                 ) {
                     Column(
@@ -135,16 +126,14 @@ private fun NodeBottomBar(
                         Icon(
                             tab.icon,
                             contentDescription = tab.label,
-                            tint = if (active) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(25.dp),
+                            tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp),
                         )
                         Text(
                             tab.label,
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                            color = if (active) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 2.dp),
                         )
                     }

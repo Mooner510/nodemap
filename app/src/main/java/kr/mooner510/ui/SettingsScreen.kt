@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Backup
-import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Lock
@@ -56,6 +55,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -63,7 +63,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.mooner510.appGraph
 import kr.mooner510.data.AppSettings
 import kr.mooner510.data.TrackingPreset
-import kr.mooner510.map.OfflineDownloadState
 import kr.mooner510.map.OfflineRegionInfo
 import kr.mooner510.tracking.TrackingService
 import kotlinx.coroutines.launch
@@ -78,6 +77,7 @@ fun SettingsScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val settings by graph.preferences.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val downloadState by graph.offlineMapManager.downloadState.collectAsStateWithLifecycle()
+
     var permissionRefresh by remember { mutableIntStateOf(0) }
     var regions by remember { mutableStateOf(emptyList<OfflineRegionInfo>()) }
     var trackDays by remember { mutableStateOf(emptyList<LocalDate>()) }
@@ -98,7 +98,6 @@ fun SettingsScreen() {
     }
 
     fun refreshRegions() = graph.offlineMapManager.list { regions = it }
-
     suspend fun refreshTrackDays() {
         val days = graph.repository.trackDays()
         trackDays = days
@@ -115,19 +114,21 @@ fun SettingsScreen() {
         graph.repository.changes.collect { refreshTrackDays() }
     }
     LaunchedEffect(downloadState) {
-        if (downloadState is OfflineDownloadState.Complete) refreshRegions()
+        refreshRegions()
     }
 
     val foregroundLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
         permissionRefresh += 1
-        if (has(context, Manifest.permission.ACCESS_FINE_LOCATION, permissionRefresh) ||
-            has(context, Manifest.permission.ACCESS_COARSE_LOCATION, permissionRefresh)
+        if (hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
+            hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
         ) {
             TrackingService.start(context)
         }
     }
+    val permissionEpoch = permissionRefresh
+
     val sensitiveLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissionRefresh += 1 }
@@ -158,17 +159,15 @@ fun SettingsScreen() {
     }
 
     LazyColumn(
-        Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
+        Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { ScreenHeader("설정", "기록 방식, 권한, 오프라인 지도와 백업을 관리합니다.") }
+        item { ScreenHeader("설정", "기록 방식, 타임랩스, 권한, 오프라인 지도와 백업을 관리합니다.") }
 
         item {
             RoundedSection {
-                SectionHeading("위치 기록", "기본은 균형 모드이며 기록 자체는 지도 네트워크와 독립적으로 동작합니다.")
-                Spacer(Modifier.height(10.dp))
+                SectionHeading("위치 기록", "기록 빈도와 이동 거리 조건을 조절합니다. 지도 네트워크와는 독립적으로 동작합니다.")
+                Spacer(Modifier.height(8.dp))
                 SettingToggleRow(
                     icon = Icons.Rounded.MyLocation,
                     title = "위치 기록",
@@ -198,12 +197,13 @@ fun SettingsScreen() {
                     description = "생체인증 또는 기기 잠금으로 보호",
                     checked = settings.biometricLockEnabled,
                 ) { scope.launch { graph.preferences.setBiometricLockEnabled(it) } }
+
                 Text(
-                    "위치 정확도",
+                    "위치 정확도 / 기록 빈도",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     TrackingPreset.entries.forEach { preset ->
                         if (preset == settings.trackingPreset) {
                             Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(preset.label) }
@@ -215,32 +215,33 @@ fun SettingsScreen() {
                         }
                     }
                 }
+                TrackingPresetDetails(settings.trackingPreset)
             }
         }
+
+        item { TimelineDisplaySettingsSection() }
 
         item {
             RoundedSection {
                 SectionHeading("권한", "허용되지 않은 기능만 개별적으로 비활성화됩니다.")
                 Spacer(Modifier.height(8.dp))
                 PermissionActionRow(
-                    Icons.Rounded.LocationOn,
-                    "정밀 위치",
-                    has(context, Manifest.permission.ACCESS_FINE_LOCATION, permissionRefresh),
+                    icon = Icons.Rounded.LocationOn,
+                    title = "정밀 위치",
+                    granted = hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION, permissionEpoch),
                 ) {
                     foregroundLauncher.launch(
                         buildList {
                             add(Manifest.permission.ACCESS_FINE_LOCATION)
                             add(Manifest.permission.ACCESS_COARSE_LOCATION)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                add(Manifest.permission.POST_NOTIFICATIONS)
-                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
                         }.toTypedArray(),
                     )
                 }
                 PermissionActionRow(
-                    Icons.Rounded.MyLocation,
-                    "백그라운드 위치",
-                    has(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION, permissionRefresh),
+                    icon = Icons.Rounded.MyLocation,
+                    title = "백그라운드 위치",
+                    granted = hasPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION, permissionEpoch),
                 ) {
                     context.startActivity(
                         Intent(
@@ -250,10 +251,9 @@ fun SettingsScreen() {
                     )
                 }
                 PermissionActionRow(
-                    Icons.Rounded.Phone,
-                    "SMS/MMS · 통화 기록",
-                    has(context, Manifest.permission.READ_SMS, permissionRefresh) &&
-                        has(context, Manifest.permission.READ_CALL_LOG, permissionRefresh),
+                    icon = Icons.Rounded.Phone,
+                    title = "SMS/MMS · 통화 기록",
+                    granted = hasPermission(context, Manifest.permission.READ_SMS, permissionEpoch) && hasPermission(context, Manifest.permission.READ_CALL_LOG, permissionEpoch),
                 ) {
                     sensitiveLauncher.launch(
                         buildList {
@@ -265,15 +265,16 @@ fun SettingsScreen() {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                 add(Manifest.permission.READ_MEDIA_AUDIO)
                             } else {
+                                @Suppress("DEPRECATION")
                                 add(Manifest.permission.READ_EXTERNAL_STORAGE)
                             }
                         }.toTypedArray(),
                     )
                 }
                 PermissionActionRow(
-                    Icons.Rounded.Notifications,
-                    "알림 접근",
-                    notificationListenerEnabled(context, permissionRefresh),
+                    icon = Icons.Rounded.Notifications,
+                    title = "알림 접근",
+                    granted = notificationListenerGranted(context, permissionEpoch),
                 ) {
                     context.startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 }
@@ -288,12 +289,8 @@ fun SettingsScreen() {
                             )
                         }
                     },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp),
-                ) {
-                    Text("배터리 최적화 예외 요청")
-                }
+                    modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
+                ) { Text("배터리 최적화 예외 요청") }
             }
         }
 
@@ -301,12 +298,12 @@ fun SettingsScreen() {
             RoundedSection {
                 SectionHeading(
                     "오프라인 지도",
-                    "기간을 고르면 그 기간에 실제로 이동한 각 날짜의 범위 주변 3km를 저장합니다.",
+                    "기간을 고르면 그 기간에 실제로 이동한 각 날짜의 범위 주변 지도를 저장합니다.",
                 )
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DayRangeButton("시작", offlineStart, Modifier.weight(1f)) { pickStart = true }
-                    DayRangeButton("종료", offlineEnd, Modifier.weight(1f)) { pickEnd = true }
+                    OfflineDayButton("시작", offlineStart, Modifier.weight(1f)) { pickStart = true }
+                    OfflineDayButton("종료", offlineEnd, Modifier.weight(1f)) { pickEnd = true }
                 }
                 Button(
                     onClick = {
@@ -316,31 +313,27 @@ fun SettingsScreen() {
                             val zone = ZoneId.systemDefault()
                             val from = start.atStartOfDay(zone).toInstant().toEpochMilli()
                             val until = end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-                            val points = graph.repository.trackPointsBetween(from, until)
-                            graph.offlineMapManager.downloadTrackPeriod(points, start, end)
+                            val trackPoints = graph.repository.trackPointsBetween(from, until)
+                            graph.offlineMapManager.downloadTrackPeriod(trackPoints, start, end)
                         }
                     },
                     enabled = offlineStart != null && offlineEnd != null,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
                 ) {
-                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(22.dp))
-                    Text("선택 기간 지도 저장", modifier = Modifier.padding(start = 8.dp))
+                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Text("선택 기간 지도 저장", modifier = Modifier.padding(start = 7.dp))
                 }
                 Text(
-                    downloadStateText(downloadState),
+                    downloadState.javaClass.simpleName.ifBlank { downloadState.toString() },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 10.dp),
+                    modifier = Modifier.padding(top = 8.dp),
                 )
                 if (regions.isNotEmpty()) {
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp))
                     regions.forEach { region ->
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
+                            Modifier.fillMaxWidth().padding(vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
@@ -351,9 +344,7 @@ fun SettingsScreen() {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            TextButton(onClick = { graph.offlineMapManager.delete(region.id) { refreshRegions() } }) {
-                                Text("삭제")
-                            }
+                            TextButton(onClick = { graph.offlineMapManager.delete(region.id) { refreshRegions() } }) { Text("삭제") }
                         }
                     }
                 }
@@ -364,26 +355,17 @@ fun SettingsScreen() {
             RoundedSection {
                 SectionHeading("암호화 백업", ".nodemap 파일 전체를 비밀번호 기반 AES-256-GCM으로 암호화합니다.")
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(top = 14.dp),
+                    Modifier.fillMaxWidth().padding(top = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(onClick = { backupAction = BackupAction.EXPORT }, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Rounded.Backup, contentDescription = null, modifier = Modifier.size(22.dp))
-                        Text("백업", modifier = Modifier.padding(start = 7.dp))
+                        Icon(Icons.Rounded.Backup, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Text("백업", modifier = Modifier.padding(start = 6.dp))
                     }
-                    OutlinedButton(onClick = { backupAction = BackupAction.RESTORE }, modifier = Modifier.weight(1f)) {
-                        Text("복원")
-                    }
+                    OutlinedButton(onClick = { backupAction = BackupAction.RESTORE }, modifier = Modifier.weight(1f)) { Text("복원") }
                 }
                 message?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 10.dp),
-                    )
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
                 }
             }
         }
@@ -418,25 +400,16 @@ fun SettingsScreen() {
 
     if (backupAction != null) {
         AlertDialog(
-            onDismissRequest = {
-                backupAction = null
-                password = ""
-            },
-            title = {
-                Text(if (backupAction == BackupAction.EXPORT) "백업 비밀번호" else "복원 비밀번호")
-            },
+            onDismissRequest = { backupAction = null; password = "" },
+            title = { Text(if (backupAction == BackupAction.EXPORT) "암호화 백업" else "백업 복원") },
             text = {
-                Column {
-                    if (backupAction == BackupAction.RESTORE) {
-                        Text("복원하면 현재 기록을 백업 내용으로 교체합니다.")
-                    }
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("8자 이상") },
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("백업 비밀번호") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
             },
             confirmButton = {
                 Button(
@@ -446,17 +419,14 @@ fun SettingsScreen() {
                         if (action == BackupAction.EXPORT) {
                             createBackup.launch("nodemap-${LocalDate.now()}.nodemap")
                         } else {
-                            openBackup.launch(arrayOf("application/octet-stream", "application/zip", "*/*"))
+                            openBackup.launch(arrayOf("application/octet-stream", "*/*"))
                         }
                     },
-                    enabled = password.length >= 8,
-                ) { Text("계속") }
+                    enabled = password.isNotBlank(),
+                ) { Text(if (backupAction == BackupAction.EXPORT) "저장" else "파일 선택") }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    backupAction = null
-                    password = ""
-                }) { Text("취소") }
+                TextButton(onClick = { backupAction = null; password = "" }) { Text("취소") }
             },
         )
     }
@@ -468,68 +438,33 @@ private fun SettingToggleRow(
     title: String,
     description: String,
     checked: Boolean,
-    onChange: (Boolean) -> Unit,
+    onChecked: (Boolean) -> Unit,
 ) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .padding(10.dp)
-                    .size(24.dp),
-            )
+        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(8.dp).size(20.dp))
         }
-        Column(
-            Modifier
-                .weight(1f)
-                .padding(horizontal = 12.dp),
-        ) {
+        Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(
-                description,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked, onCheckedChange = onChecked)
     }
 }
 
 @Composable
-private fun PermissionActionRow(
-    icon: ImageVector,
-    title: String,
-    granted: Boolean,
-    onClick: () -> Unit,
-) {
+private fun PermissionActionRow(icon: ImageVector, title: String, granted: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 7.dp),
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(25.dp),
-        )
-        Text(
-            title,
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier
-                .padding(start = 12.dp)
-                .weight(1f),
-        )
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(21.dp))
+        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 10.dp))
         if (granted) {
-            Text("허용됨", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+            Text("허용됨", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         } else {
             FilledTonalButton(onClick = onClick) { Text("설정") }
         }
@@ -537,39 +472,20 @@ private fun PermissionActionRow(
 }
 
 @Composable
-private fun DayRangeButton(
-    label: String,
-    day: LocalDate?,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    OutlinedButton(onClick = onClick, enabled = day != null, modifier = modifier) {
-        Icon(Icons.Rounded.CalendarMonth, contentDescription = null, modifier = Modifier.size(20.dp))
-        Column(Modifier.padding(start = 7.dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium)
-            Text(day?.toString() ?: "기록 없음", style = MaterialTheme.typography.labelLarge)
-        }
+private fun OfflineDayButton(label: String, day: LocalDate?, modifier: Modifier, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, modifier = modifier) {
+        Text("$label ${day ?: "-"}")
     }
 }
 
-private fun downloadStateText(state: OfflineDownloadState): String = when (state) {
-    OfflineDownloadState.Idle -> "저장할 기간을 선택하세요."
-    is OfflineDownloadState.Downloading ->
-        "${state.name}: ${state.completed}/${state.required.takeIf { it > 0 } ?: "?"} · ${state.bytes / 1024 / 1024} MB"
-    is OfflineDownloadState.Complete -> "${state.name} 완료 · ${state.bytes / 1024 / 1024} MB"
-    is OfflineDownloadState.Failed -> "실패: ${state.message}"
-}
-
-private fun has(context: android.content.Context, permission: String, refresh: Int): Boolean {
+private fun hasPermission(context: android.content.Context, permission: String, refresh: Int = 0): Boolean {
     refresh.hashCode()
     return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 }
 
-private fun notificationListenerEnabled(context: android.content.Context, refresh: Int): Boolean {
+private fun notificationListenerGranted(context: android.content.Context, refresh: Int): Boolean {
     refresh.hashCode()
-    return AndroidSettings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-        .orEmpty()
-        .contains(context.packageName)
+    return NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
 }
 
 private enum class BackupAction { EXPORT, RESTORE }
