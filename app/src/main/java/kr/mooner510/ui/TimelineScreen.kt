@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Paint
+import android.location.Location
 import android.os.SystemClock
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -88,12 +89,21 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.maplibre.android.annotations.Icon as MapIcon
 import org.maplibre.android.annotations.IconFactory
 import org.maplibre.android.annotations.MarkerOptions
-import org.maplibre.android.annotations.PolylineOptions
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.PropertyFactory.lineCap
+import org.maplibre.android.style.layers.PropertyFactory.lineColor
+import org.maplibre.android.style.layers.PropertyFactory.lineDasharray
+import org.maplibre.android.style.layers.PropertyFactory.lineJoin
+import org.maplibre.android.style.layers.PropertyFactory.lineOpacity
+import org.maplibre.android.style.layers.PropertyFactory.lineWidth
+import org.maplibre.android.style.sources.GeoJsonSource
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -108,6 +118,21 @@ private const val MINUTE_MS = 60_000L
 private const val MAP_PREVIEW_INTERVAL_MS = 80L
 private const val PRECISION_HOLD_MS = 1_000L
 private const val PRECISION_SCALE = 4f
+private const val ROUTE_GAP_THRESHOLD_MS = 90_000L
+private const val ROUTE_GAP_MIN_DISTANCE_METERS = 25f
+private const val ROUTE_OLD_SOURCE_ID = "nodemap-timeline-route-old-source"
+private const val ROUTE_OLD_CASING_LAYER_ID = "nodemap-timeline-route-old-casing"
+private const val ROUTE_OLD_LAYER_ID = "nodemap-timeline-route-old"
+private const val ROUTE_DETAIL_SOURCE_ID = "nodemap-timeline-route-detail-source"
+private const val ROUTE_DETAIL_CASING_LAYER_ID = "nodemap-timeline-route-detail-casing"
+private const val ROUTE_DETAIL_LAYER_ID = "nodemap-timeline-route-detail"
+private const val ROUTE_GAP_SOURCE_ID = "nodemap-timeline-route-gap-source"
+private const val ROUTE_GAP_CASING_LAYER_ID = "nodemap-timeline-route-gap-casing"
+private const val ROUTE_GAP_LAYER_ID = "nodemap-timeline-route-gap"
+private val ROUTE_OLD_COLOR = android.graphics.Color.rgb(59, 130, 246)
+private val ROUTE_DETAIL_COLOR = android.graphics.Color.rgb(29, 78, 216)
+private val ROUTE_GAP_COLOR = android.graphics.Color.rgb(245, 158, 11)
+private val ROUTE_CASING_COLOR = android.graphics.Color.argb(204, 255, 255, 255)
 private val timelineTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val timelineDateFormatter = DateTimeFormatter.ofPattern("M월 d일 EEEE", Locale.KOREAN)
 
@@ -396,7 +421,7 @@ private fun TimelineMap(
             onResume()
         }
     }
-    val currentIcon = remember(context) { makeTimelineDotIcon(context, 38f, android.graphics.Color.rgb(49, 130, 246)) }
+    val currentIcon = remember(context) { makeTimelineDotIcon(context, 38f, ROUTE_DETAIL_COLOR) }
     val selectedIcon = remember(context) { makeTimelineDotIcon(context, 30f, android.graphics.Color.rgb(25, 31, 40)) }
     val pinIconCache = remember { mutableMapOf<String, MapIcon>() }
     var appliedStyle by remember { mutableStateOf<String?>(null) }
@@ -521,29 +546,8 @@ private fun drawTimelineMap(
     val totalStart = renderTime - totalWindowMinutes * MINUTE_MS
     val detailStart = renderTime - detailWindowMinutes * MINUTE_MS
     val total = points.filter { it.timestamp in totalStart..renderTime }
-    val old = total.filter { it.timestamp < detailStart }
-    val detailed = total.filter { it.timestamp >= detailStart }
-
-    splitTimelineAtGaps(old).forEach { segment ->
-        if (segment.size >= 2) {
-            map.addPolyline(
-                PolylineOptions()
-                    .addAll(segment.map { LatLng(it.latitude, it.longitude) })
-                    .color(android.graphics.Color.argb(78, 49, 130, 246))
-                    .width(5f),
-            )
-        }
-    }
-    splitTimelineAtGaps(detailed).forEach { segment ->
-        if (segment.size >= 2) {
-            map.addPolyline(
-                PolylineOptions()
-                    .addAll(segment.map { LatLng(it.latitude, it.longitude) })
-                    .color(android.graphics.Color.rgb(49, 130, 246))
-                    .width(8f),
-            )
-        }
-    }
+    val routeData = buildTimelineRouteData(total, detailStart)
+    renderTimelineRouteLayers(map, routeData)
 
     latestPoint?.let {
         map.addMarker(
@@ -581,19 +585,150 @@ private fun drawTimelineMap(
         }
 }
 
-private fun splitTimelineAtGaps(points: List<TrackPoint>, maxGapMs: Long = 300_000L): List<List<TrackPoint>> {
-    if (points.isEmpty()) return emptyList()
-    val result = mutableListOf<MutableList<TrackPoint>>()
-    var current = mutableListOf(points.first())
-    result += current
-    for (point in points.drop(1)) {
-        if (point.timestamp - current.last().timestamp > maxGapMs) {
-            current = mutableListOf()
-            result += current
+private data class TimelineRouteData(
+    val oldSegments: List<List<TrackPoint>>,
+    val detailSegments: List<List<TrackPoint>>,
+    val gapSegments: List<List<TrackPoint>>,
+)
+
+private fun buildTimelineRouteData(
+    points: List<TrackPoint>,
+    detailStart: Long,
+    maxGapMs: Long = ROUTE_GAP_THRESHOLD_MS,
+): TimelineRouteData {
+    if (points.isEmpty()) return TimelineRouteData(emptyList(), emptyList(), emptyList())
+
+    val sorted = points.sortedBy { it.timestamp }
+    val solidSegments = mutableListOf<List<TrackPoint>>()
+    val gapSegments = mutableListOf<List<TrackPoint>>()
+    var current = mutableListOf(sorted.first())
+
+    for (point in sorted.drop(1)) {
+        val previous = current.last()
+        if (point.timestamp - previous.timestamp > maxGapMs) {
+            if (current.size >= 2) solidSegments += current.toList()
+            if (isMeaningfulRouteGap(previous, point)) gapSegments += listOf(previous, point)
+            current = mutableListOf(point)
+        } else {
+            current += point
         }
-        current += point
     }
-    return result
+    if (current.size >= 2) solidSegments += current.toList()
+
+    val oldSegments = mutableListOf<List<TrackPoint>>()
+    val detailSegments = mutableListOf<List<TrackPoint>>()
+    solidSegments.forEach { segment ->
+        val firstDetailIndex = segment.indexOfFirst { it.timestamp >= detailStart }
+        when {
+            firstDetailIndex < 0 -> oldSegments += segment
+            firstDetailIndex == 0 -> detailSegments += segment
+            else -> {
+                val oldPart = segment.take(firstDetailIndex)
+                if (oldPart.size >= 2) oldSegments += oldPart
+                val detailedPart = segment.drop(firstDetailIndex - 1)
+                if (detailedPart.size >= 2) detailSegments += detailedPart
+            }
+        }
+    }
+
+    return TimelineRouteData(oldSegments, detailSegments, gapSegments)
+}
+
+private fun isMeaningfulRouteGap(start: TrackPoint, end: TrackPoint): Boolean {
+    val result = FloatArray(1)
+    Location.distanceBetween(start.latitude, start.longitude, end.latitude, end.longitude, result)
+    val uncertaintyMeters = max(ROUTE_GAP_MIN_DISTANCE_METERS, start.accuracyMeters + end.accuracyMeters)
+    return result[0] > uncertaintyMeters
+}
+
+private fun renderTimelineRouteLayers(map: MapLibreMap, data: TimelineRouteData) {
+    val style = map.style ?: return
+    updateTimelineLineLayers(
+        style = style,
+        sourceId = ROUTE_OLD_SOURCE_ID,
+        casingLayerId = ROUTE_OLD_CASING_LAYER_ID,
+        lineLayerId = ROUTE_OLD_LAYER_ID,
+        geoJson = routeGeoJson(data.oldSegments),
+        color = ROUTE_OLD_COLOR,
+        width = 5.5f,
+        opacity = 0.78f,
+    )
+    updateTimelineLineLayers(
+        style = style,
+        sourceId = ROUTE_DETAIL_SOURCE_ID,
+        casingLayerId = ROUTE_DETAIL_CASING_LAYER_ID,
+        lineLayerId = ROUTE_DETAIL_LAYER_ID,
+        geoJson = routeGeoJson(data.detailSegments),
+        color = ROUTE_DETAIL_COLOR,
+        width = 7.5f,
+        opacity = 1f,
+    )
+    updateTimelineLineLayers(
+        style = style,
+        sourceId = ROUTE_GAP_SOURCE_ID,
+        casingLayerId = ROUTE_GAP_CASING_LAYER_ID,
+        lineLayerId = ROUTE_GAP_LAYER_ID,
+        geoJson = routeGeoJson(data.gapSegments),
+        color = ROUTE_GAP_COLOR,
+        width = 6.5f,
+        opacity = 1f,
+        dashArray = arrayOf(2.2f, 1.7f),
+    )
+}
+
+private fun updateTimelineLineLayers(
+    style: Style,
+    sourceId: String,
+    casingLayerId: String,
+    lineLayerId: String,
+    geoJson: String,
+    color: Int,
+    width: Float,
+    opacity: Float,
+    dashArray: Array<Float>? = null,
+) {
+    val source = style.getSourceAs<GeoJsonSource>(sourceId)
+    if (source == null) {
+        style.addSource(GeoJsonSource(sourceId, geoJson))
+    } else {
+        source.setGeoJson(geoJson)
+    }
+
+    if (style.getLayer(casingLayerId) == null) {
+        val casingLayer = LineLayer(casingLayerId, sourceId).withProperties(
+            lineColor(ROUTE_CASING_COLOR),
+            lineWidth(width + 3f),
+            lineOpacity(max(opacity, 0.82f)),
+            lineCap(Property.LINE_CAP_ROUND),
+            lineJoin(Property.LINE_JOIN_ROUND),
+        )
+        dashArray?.let { casingLayer.setProperties(lineDasharray(it)) }
+        style.addLayer(casingLayer)
+    }
+
+    if (style.getLayer(lineLayerId) == null) {
+        val routeLayer = LineLayer(lineLayerId, sourceId).withProperties(
+            lineColor(color),
+            lineWidth(width),
+            lineOpacity(opacity),
+            lineCap(Property.LINE_CAP_ROUND),
+            lineJoin(Property.LINE_JOIN_ROUND),
+        )
+        dashArray?.let { routeLayer.setProperties(lineDasharray(it)) }
+        style.addLayer(routeLayer)
+    }
+}
+
+private fun routeGeoJson(segments: List<List<TrackPoint>>): String {
+    val features = segments.asSequence()
+        .filter { it.size >= 2 }
+        .joinToString(",") { segment ->
+            val coordinates = segment.joinToString(",") { point ->
+                "[${point.longitude},${point.latitude}]"
+            }
+            "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"LineString\",\"coordinates\":[$coordinates]}}"
+        }
+    return "{\"type\":\"FeatureCollection\",\"features\":[$features]}"
 }
 
 @Composable
