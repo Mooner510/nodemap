@@ -115,7 +115,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val MINUTE_MS = 60_000L
-private const val MAP_PREVIEW_INTERVAL_MS = 80L
+private const val MAP_PREVIEW_INTERVAL_MS = 150L
 private const val PRECISION_HOLD_MS = 1_000L
 private const val PRECISION_SCALE = 4f
 private const val ROUTE_GAP_THRESHOLD_MS = 90_000L
@@ -180,7 +180,6 @@ fun TimelineScreen() {
     }
 
     LaunchedEffect(Unit) {
-        // Seed the first camera before the MapView is made visible.
         latestPoint = graph.repository.latestTrackPoint()
         pinTypes = graph.repository.pinTypes()
         availableDays = graph.repository.dataDays()
@@ -495,7 +494,7 @@ private fun TimelineMap(
             }
         }
         if (scrubbing) {
-            fitCamera(map, true)
+            fitCamera(map, false)
         } else if (fitRequest != handledFit) {
             handledFit = fitRequest
             fitCamera(map, true)
@@ -570,7 +569,6 @@ private fun drawTimelineMap(
             )
         }
 
-    // Every visible pin in the detailed past window remains on the map.
     pins.asSequence()
         .filter { it.event.timestamp in detailStart..renderTime }
         .filter { it.event.latitude != null && it.event.longitude != null }
@@ -672,7 +670,7 @@ private fun renderTimelineRouteLayers(map: MapLibreMap, data: TimelineRouteData)
         color = ROUTE_GAP_COLOR,
         width = 6.5f,
         opacity = 1f,
-        dashArray = arrayOf(2.2f, 1.7f),
+        dashArray = arrayOf(1.2f, 2.8f),
     )
 }
 
@@ -694,15 +692,20 @@ private fun updateTimelineLineLayers(
         source.setGeoJson(geoJson)
     }
 
+    val lineCapValue = if (dashArray == null) Property.LINE_CAP_ROUND else Property.LINE_CAP_BUTT
     if (style.getLayer(casingLayerId) == null) {
+        val casingWidth = width + 3f
         val casingLayer = LineLayer(casingLayerId, sourceId).withProperties(
             lineColor(ROUTE_CASING_COLOR),
-            lineWidth(width + 3f),
+            lineWidth(casingWidth),
             lineOpacity(max(opacity, 0.82f)),
-            lineCap(Property.LINE_CAP_ROUND),
+            lineCap(lineCapValue),
             lineJoin(Property.LINE_JOIN_ROUND),
         )
-        dashArray?.let { casingLayer.setProperties(lineDasharray(it)) }
+        dashArray?.let { dash ->
+            val scale = width / casingWidth
+            casingLayer.setProperties(lineDasharray(Array(dash.size) { index -> dash[index] * scale }))
+        }
         style.addLayer(casingLayer)
     }
 
@@ -711,7 +714,7 @@ private fun updateTimelineLineLayers(
             lineColor(color),
             lineWidth(width),
             lineOpacity(opacity),
-            lineCap(Property.LINE_CAP_ROUND),
+            lineCap(lineCapValue),
             lineJoin(Property.LINE_JOIN_ROUND),
         )
         dashArray?.let { routeLayer.setProperties(lineDasharray(it)) }
@@ -782,8 +785,9 @@ private fun TimelineScrubber(
     val zoomState = rememberUpdatedState(zoom)
     val density = LocalDensity.current
     val effectiveRadiusMs = (radiusMinutes * MINUTE_MS / zoom.coerceAtLeast(1f)).toLong().coerceAtLeast(MINUTE_MS)
-    val clusters = remember(pins, displayTime, effectiveRadiusMs, widthPx) {
-        clusterDialPins(pins, displayTime, effectiveRadiusMs, widthPx, with(density) { 28.dp.toPx() })
+    val sortedPins = remember(pins) { pins.sortedBy { it.event.timestamp } }
+    val clusters = remember(sortedPins, displayTime, effectiveRadiusMs, widthPx) {
+        clusterDialPins(sortedPins, displayTime, effectiveRadiusMs, widthPx, with(density) { 28.dp.toPx() })
     }
     val primary = MaterialTheme.colorScheme.primary
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
@@ -819,7 +823,7 @@ private fun TimelineScrubber(
                             var latest = origin
                             var released = false
                             var moved = false
-                            var lastMapUpdate = 0L
+                            var lastMapUpdate = SystemClock.uptimeMillis()
 
                             val held = withTimeoutOrNull(PRECISION_HOLD_MS) {
                                 while (true) {
@@ -875,7 +879,6 @@ private fun TimelineScrubber(
                                 }
                                 last = change.position
                             }
-                            previewCallback.value(preview)
                             precision = false
                             dragging = false
                             commitCallback.value(preview)
@@ -944,7 +947,6 @@ private fun clusterDialPins(
     val span = radiusMs * 2.0
     val visible = pins.asSequence()
         .filter { it.event.timestamp in (centerTime - radiusMs)..(centerTime + radiusMs) }
-        .sortedBy { it.event.timestamp }
         .map {
             val x = widthPx / 2f + (((it.event.timestamp - centerTime).toDouble() / span) * widthPx).toFloat()
             x to it
