@@ -2,6 +2,9 @@ package kr.mooner510
 
 import android.content.Context
 import kr.mooner510.backup.BackupManager
+import kr.mooner510.backup.BackupServerClient
+import kr.mooner510.backup.CloudBackupManager
+import kr.mooner510.backup.GoogleBackupAuth
 import kr.mooner510.data.AttachmentStore
 import kr.mooner510.data.CryptoManager
 import kr.mooner510.data.NodeMapDb
@@ -22,4 +25,7 @@ class AppGraph(context: Context) {
     val offlineMapManager = OfflineMapManager(appContext, preferences)
     val routineShortcutManager = RoutineShortcutManager(appContext, repository)
     val backupManager = BackupManager(appContext, repository, attachmentStore)
+    private val googleBackupAuth = GoogleBackupAuth(BuildConfig.GOOGLE_SERVER_CLIENT_ID)
+    private val backupServerClient = BackupServerClient(BuildConfig.BACKUP_SERVER_URL)
+    val cloudBackupManager = CloudBackupManager(appContext, backupManager, googleBackupAuth, backupServerClient)
 }

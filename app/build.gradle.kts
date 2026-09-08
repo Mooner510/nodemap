@@ -3,6 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+fun String.asBuildConfigString(): String = "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val backupServerUrl = providers.gradleProperty("NODEMAP_BACKUP_SERVER_URL")
+    .orElse(providers.environmentVariable("NODEMAP_BACKUP_SERVER_URL"))
+    .orElse("")
+val googleServerClientId = providers.gradleProperty("NODEMAP_GOOGLE_SERVER_CLIENT_ID")
+    .orElse(providers.environmentVariable("NODEMAP_GOOGLE_SERVER_CLIENT_ID"))
+    .orElse("")
+
 android {
     namespace = "kr.mooner510"
     compileSdk = 36
@@ -11,8 +20,10 @@ android {
         applicationId = "kr.mooner510"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
+        buildConfigField("String", "BACKUP_SERVER_URL", backupServerUrl.get().asBuildConfigString())
+        buildConfigField("String", "GOOGLE_SERVER_CLIENT_ID", googleServerClientId.get().asBuildConfigString())
     }
 
     buildFeatures { compose = true; buildConfig = true }
@@ -52,6 +63,9 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.8.9")
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.2.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.maplibre.gl:android-sdk-opengl:13.4.1")
 }

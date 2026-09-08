@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Settings
@@ -69,6 +70,7 @@ fun NodeMapApp() {
                 MainTab("타임랩스", Icons.Rounded.Map),
                 MainTab("압정", Icons.Rounded.PushPin),
                 MainTab("규칙", Icons.Rounded.Tune),
+                MainTab("백업", Icons.Rounded.Cloud),
                 MainTab("설정", Icons.Rounded.Settings),
             )
         }
@@ -89,6 +91,7 @@ fun NodeMapApp() {
                     0 -> TimelineScreen()
                     1 -> PinListScreen()
                     2 -> PinRulesScreen()
+                    3 -> CloudBackupScreen()
                     else -> SettingsScreen()
                 }
             }
