@@ -9,6 +9,7 @@ import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import kr.mooner510.appGraph
 import kr.mooner510.data.EventType
 import kr.mooner510.data.PinRuleMatchContext
@@ -26,7 +27,10 @@ class NotificationCaptureService : NotificationListenerService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        scope.launch { capture(sbn) }
+        scope.launch {
+            runCatching { capture(sbn) }
+                .onFailure { error -> Log.w(TAG, "Notification capture failed", error) }
+        }
     }
 
     override fun onDestroy() {
@@ -97,6 +101,8 @@ class NotificationCaptureService : NotificationListenerService() {
                     out.toByteArray()
                 }
                 appGraph.repository.addEncryptedAttachment(event.id, kind, "image/png", ByteArrayInputStream(bytes))
+            }.onFailure { error ->
+                Log.w(TAG, "Notification attachment capture failed: $kind", error)
             }
         }
     }
@@ -124,5 +130,9 @@ class NotificationCaptureService : NotificationListenerService() {
             setBounds(0, 0, canvas.width, canvas.height)
             draw(canvas)
         }
+    }
+
+    private companion object {
+        const val TAG = "NotificationCapture"
     }
 }
