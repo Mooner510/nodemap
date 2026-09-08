@@ -287,7 +287,7 @@ private fun RuleRow(
                     }
                 }
                 Text(
-                    "${sourceLabel(rule.source)} · ${type?.name ?: "타입 없음"} · 생성 $usage개" +
+                    "${sourceLabel(rule.source)} · ${type?.name ?: "타입 없음"} · 생성 ${usage}개" +
                         if (rule.hidden) " · 숨김" else "",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -542,7 +542,7 @@ private fun PinRuleDialog(
                     item {
                         Text(
                             if (initial.system) "시스템 룰은 삭제할 수 없습니다. 비활성화할 수 있습니다."
-                            else if (usageCount > 0) "압정을 $usageCount개 생성한 룰은 삭제할 수 없습니다. 비활성화 후 숨길 수 있습니다."
+                            else if (usageCount > 0) "압정을 ${usageCount}개 생성한 룰은 삭제할 수 없습니다. 비활성화 후 숨길 수 있습니다."
                             else "",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
