@@ -11,8 +11,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,7 +63,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,7 +71,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -86,8 +88,6 @@ import kr.mooner510.data.ResolvedPin
 import kr.mooner510.data.SYSTEM_TYPE_GENERAL
 import kr.mooner510.data.TimelineEvent
 import kr.mooner510.data.TrackPoint
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.maplibre.android.annotations.Icon as MapIcon
@@ -114,19 +114,14 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.absoluteValue
-import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val MINUTE_MS = 60_000L
-private const val MAP_PREVIEW_INTERVAL_MS = 220L
+private const val MAP_PREVIEW_INTERVAL_MS = 160L
 private const val PRECISION_HOLD_MS = 1_000L
 private const val PRECISION_SCALE = 4f
-private const val DIAL_FLING_FRICTION_PER_SECOND = 3.0
-private const val DIAL_FLING_MIN_SCREENS_PER_SECOND = 0.35f
-private const val DIAL_FLING_MAX_SCREENS_PER_SECOND = 6f
-private const val DIAL_FLING_STOP_SCREENS_PER_SECOND = 0.06f
 private const val ROUTE_GAP_THRESHOLD_MS = 90_000L
 private const val ROUTE_GAP_MIN_DISTANCE_METERS = 25f
 private const val ROUTE_OLD_SOURCE_ID = "nodemap-timeline-route-old-source"
@@ -781,19 +776,49 @@ private fun TimelineScrubber(
     val previewCallback = rememberUpdatedState(onPreview)
     val commitCallback = rememberUpdatedState(onCommit)
     val startCallback = rememberUpdatedState(onStart)
-    val flingScope = rememberCoroutineScope()
-    var flingJob by remember { mutableStateOf<Job?>(null) }
-    var dragging by remember { mutableStateOf(false) }
+    var interactionActive by remember { mutableStateOf(false) }
     var precision by remember { mutableStateOf(false) }
     var preview by remember { mutableLongStateOf(selectedTime) }
     var widthPx by remember { mutableFloatStateOf(1f) }
-    val displayTime = if (dragging) preview else selectedTime
+    var lastMapUpdate by remember { mutableLongStateOf(0L) }
+
     val zoom by animateFloatAsState(
         targetValue = if (precision) PRECISION_SCALE else 1f,
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
         label = "timelinePrecision",
     )
     val zoomState = rememberUpdatedState(zoom)
+    val widthState = rememberUpdatedState(widthPx)
+    val radiusState = rememberUpdatedState(radiusMinutes)
+
+    val scrollState = rememberScrollableState { deltaPx ->
+        if (!interactionActive) {
+            interactionActive = true
+            preview = selectedState.value
+            startCallback.value()
+        }
+
+        val currentWidth = widthState.value.coerceAtLeast(1f)
+        val radiusMs = radiusState.value * MINUTE_MS.toDouble() / zoomState.value.coerceAtLeast(1f)
+        val millisPerPx = radiusMs * 2.0 / currentWidth
+        val previous = preview
+        val target = (previous - deltaPx * millisPerPx).toLong().coerceIn(startState.value, endState.value)
+        preview = target
+
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMapUpdate >= MAP_PREVIEW_INTERVAL_MS) {
+            lastMapUpdate = now
+            previewCallback.value(preview)
+        }
+
+        if (target == previous || millisPerPx <= 0.0) {
+            0f
+        } else {
+            ((previous - target) / millisPerPx).toFloat()
+        }
+    }
+    val flingBehavior = ScrollableDefaults.flingBehavior()
+    val displayTime = if (interactionActive || scrollState.isScrollInProgress) preview else selectedTime
     val density = LocalDensity.current
     val effectiveRadiusMs = (radiusMinutes * MINUTE_MS / zoom.coerceAtLeast(1f)).toLong().coerceAtLeast(MINUTE_MS)
     val sortedPins = remember(pins) { pins.sortedBy { it.event.timestamp } }
@@ -803,7 +828,17 @@ private fun TimelineScrubber(
     val primary = MaterialTheme.colorScheme.primary
     val tickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f)
 
-    LaunchedEffect(selectedTime, dragging) { if (!dragging) preview = selectedTime }
+    LaunchedEffect(selectedTime, scrollState.isScrollInProgress, interactionActive) {
+        if (!scrollState.isScrollInProgress) {
+            if (interactionActive) {
+                previewCallback.value(preview)
+                commitCallback.value(preview)
+                interactionActive = false
+            } else {
+                preview = selectedTime
+            }
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
@@ -823,25 +858,19 @@ private fun TimelineScrubber(
                     .fillMaxWidth()
                     .height(78.dp)
                     .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
-                    .pointerInput(tickMinutes, radiusMinutes, rangeStart, rangeEnd) {
+                    .scrollable(
+                        state = scrollState,
+                        orientation = Orientation.Horizontal,
+                        flingBehavior = flingBehavior,
+                        reverseDirection = true,
+                    )
+                    .pointerInput(PRECISION_HOLD_MS) {
                         awaitEachGesture {
-                            val continuingFling = flingJob?.isActive == true
-                            flingJob?.cancel()
-                            flingJob = null
-
                             val down = awaitFirstDown(requireUnconsumed = false)
-                            dragging = true
                             precision = false
-                            if (!continuingFling) preview = selectedState.value
-                            startCallback.value()
-
-                            val velocityTracker = VelocityTracker()
-                            velocityTracker.addPosition(down.uptimeMillis, down.position)
                             val origin = down.position
-                            var latest = origin
                             var released = false
                             var moved = false
-                            var lastMapUpdate = SystemClock.uptimeMillis()
 
                             val held = withTimeoutOrNull(PRECISION_HOLD_MS) {
                                 while (true) {
@@ -850,99 +879,26 @@ private fun TimelineScrubber(
                                         released = true
                                         return@withTimeoutOrNull Unit
                                     }
-                                    latest = change.position
-                                    velocityTracker.addPosition(change.uptimeMillis, change.position)
+                                    if ((change.position - origin).getDistance() > viewConfiguration.touchSlop) {
+                                        moved = true
+                                        return@withTimeoutOrNull Unit
+                                    }
                                     if (!change.pressed) {
                                         released = true
                                         return@withTimeoutOrNull Unit
                                     }
-                                    if ((latest - origin).getDistance() > viewConfiguration.touchSlop) {
-                                        moved = true
-                                        return@withTimeoutOrNull Unit
-                                    }
                                 }
                             }
-                            if (released) {
-                                dragging = false
-                                precision = false
-                                commitCallback.value(preview)
-                                return@awaitEachGesture
-                            }
-                            if (held == null && !moved) precision = true
-
-                            fun applyDelta(deltaPx: Float, forceMapUpdate: Boolean = false): Boolean {
-                                val radiusMs = radiusMinutes * MINUTE_MS.toDouble() / zoomState.value.coerceAtLeast(1f)
-                                val millisPerPx = radiusMs * 2.0 / widthPx.coerceAtLeast(1f)
-                                val previous = preview
-                                preview = (preview - deltaPx * millisPerPx).toLong().coerceIn(startState.value, endState.value)
-                                val now = SystemClock.uptimeMillis()
-                                if (forceMapUpdate || now - lastMapUpdate >= MAP_PREVIEW_INTERVAL_MS) {
-                                    lastMapUpdate = now
-                                    previewCallback.value(preview)
-                                }
-                                return preview != previous
+                            if (held == null && !released && !moved) {
+                                precision = true
                             }
 
-                            var last = if (moved) origin else latest
-                            if (moved) {
-                                val delta = latest.x - origin.x
-                                if (delta != 0f) applyDelta(delta)
-                                last = latest
-                            }
-                            while (true) {
+                            while (!released) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 if (!change.pressed) break
-                                val delta = change.position.x - last.x
-                                if (delta != 0f) {
-                                    change.consume()
-                                    applyDelta(delta)
-                                }
-                                last = change.position
                             }
-
-                            val wasPrecision = precision
                             precision = false
-                            val screenWidth = widthPx.coerceAtLeast(1f)
-                            val minVelocity = screenWidth * DIAL_FLING_MIN_SCREENS_PER_SECOND
-                            val maxVelocity = screenWidth * DIAL_FLING_MAX_SCREENS_PER_SECOND
-                            val stopVelocity = screenWidth * DIAL_FLING_STOP_SCREENS_PER_SECOND
-                            val releaseVelocity = runCatching { velocityTracker.calculateVelocity().x }
-                                .getOrDefault(0f)
-                                .coerceIn(-maxVelocity, maxVelocity)
-
-                            if (moved && !wasPrecision && releaseVelocity.absoluteValue >= minVelocity) {
-                                flingJob = flingScope.launch {
-                                    var velocityPxPerSecond = releaseVelocity.toDouble()
-                                    var lastFrameNanos = 0L
-                                    while (isActive && velocityPxPerSecond.absoluteValue > stopVelocity) {
-                                        withFrameNanos { frameNanos ->
-                                            if (lastFrameNanos != 0L) {
-                                                val deltaSeconds = ((frameNanos - lastFrameNanos) / 1_000_000_000.0)
-                                                    .coerceIn(0.0, 0.05)
-                                                val movedInRange = applyDelta((velocityPxPerSecond * deltaSeconds).toFloat())
-                                                if (!movedInRange) {
-                                                    velocityPxPerSecond = 0.0
-                                                } else {
-                                                    velocityPxPerSecond *= exp(-DIAL_FLING_FRICTION_PER_SECOND * deltaSeconds)
-                                                }
-                                            }
-                                            lastFrameNanos = frameNanos
-                                        }
-                                    }
-                                    if (isActive) {
-                                        applyDelta(0f, forceMapUpdate = true)
-                                        dragging = false
-                                        commitCallback.value(preview)
-                                        flingJob = null
-                                    }
-                                }
-                            } else {
-                                applyDelta(0f, forceMapUpdate = true)
-                                dragging = false
-                                commitCallback.value(preview)
-                            }
                         }
                     },
             ) {
