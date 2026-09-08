@@ -59,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +68,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -84,6 +86,8 @@ import kr.mooner510.data.ResolvedPin
 import kr.mooner510.data.SYSTEM_TYPE_GENERAL
 import kr.mooner510.data.TimelineEvent
 import kr.mooner510.data.TrackPoint
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.maplibre.android.annotations.Icon as MapIcon
@@ -110,14 +114,19 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.absoluteValue
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val MINUTE_MS = 60_000L
-private const val MAP_PREVIEW_INTERVAL_MS = 150L
+private const val MAP_PREVIEW_INTERVAL_MS = 220L
 private const val PRECISION_HOLD_MS = 1_000L
 private const val PRECISION_SCALE = 4f
+private const val DIAL_FLING_FRICTION_PER_SECOND = 3.0
+private const val DIAL_FLING_MIN_SCREENS_PER_SECOND = 0.35f
+private const val DIAL_FLING_MAX_SCREENS_PER_SECOND = 6f
+private const val DIAL_FLING_STOP_SCREENS_PER_SECOND = 0.06f
 private const val ROUTE_GAP_THRESHOLD_MS = 90_000L
 private const val ROUTE_GAP_MIN_DISTANCE_METERS = 25f
 private const val ROUTE_OLD_SOURCE_ID = "nodemap-timeline-route-old-source"
@@ -772,6 +781,8 @@ private fun TimelineScrubber(
     val previewCallback = rememberUpdatedState(onPreview)
     val commitCallback = rememberUpdatedState(onCommit)
     val startCallback = rememberUpdatedState(onStart)
+    val flingScope = rememberCoroutineScope()
+    var flingJob by remember { mutableStateOf<Job?>(null) }
     var dragging by remember { mutableStateOf(false) }
     var precision by remember { mutableStateOf(false) }
     var preview by remember { mutableLongStateOf(selectedTime) }
@@ -802,7 +813,7 @@ private fun TimelineScrubber(
         Column(Modifier.padding(top = 10.dp, bottom = 6.dp)) {
             Text(timelineFormatTime(displayTime), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.align(Alignment.CenterHorizontally))
             Text(
-                if (precision || zoom > 1.1f) "정밀 조정 · 4× 확대" else "좌우로 이동 · 1초간 가만히 누르면 정밀 확대",
+                if (precision || zoom > 1.1f) "정밀 조정 · 4× 확대" else "좌우로 이동 · 빠르게 놓으면 관성 이동 · 1초간 누르면 정밀 확대",
                 style = MaterialTheme.typography.labelMedium,
                 color = if (precision) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -814,11 +825,18 @@ private fun TimelineScrubber(
                     .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
                     .pointerInput(tickMinutes, radiusMinutes, rangeStart, rangeEnd) {
                         awaitEachGesture {
+                            val continuingFling = flingJob?.isActive == true
+                            flingJob?.cancel()
+                            flingJob = null
+
                             val down = awaitFirstDown(requireUnconsumed = false)
                             dragging = true
                             precision = false
-                            preview = selectedState.value
+                            if (!continuingFling) preview = selectedState.value
                             startCallback.value()
+
+                            val velocityTracker = VelocityTracker()
+                            velocityTracker.addPosition(down.uptimeMillis, down.position)
                             val origin = down.position
                             var latest = origin
                             var released = false
@@ -833,6 +851,7 @@ private fun TimelineScrubber(
                                         return@withTimeoutOrNull Unit
                                     }
                                     latest = change.position
+                                    velocityTracker.addPosition(change.uptimeMillis, change.position)
                                     if (!change.pressed) {
                                         released = true
                                         return@withTimeoutOrNull Unit
@@ -851,15 +870,17 @@ private fun TimelineScrubber(
                             }
                             if (held == null && !moved) precision = true
 
-                            fun applyDelta(deltaPx: Float) {
+                            fun applyDelta(deltaPx: Float, forceMapUpdate: Boolean = false): Boolean {
                                 val radiusMs = radiusMinutes * MINUTE_MS.toDouble() / zoomState.value.coerceAtLeast(1f)
                                 val millisPerPx = radiusMs * 2.0 / widthPx.coerceAtLeast(1f)
+                                val previous = preview
                                 preview = (preview - deltaPx * millisPerPx).toLong().coerceIn(startState.value, endState.value)
                                 val now = SystemClock.uptimeMillis()
-                                if (now - lastMapUpdate >= MAP_PREVIEW_INTERVAL_MS) {
+                                if (forceMapUpdate || now - lastMapUpdate >= MAP_PREVIEW_INTERVAL_MS) {
                                     lastMapUpdate = now
                                     previewCallback.value(preview)
                                 }
+                                return preview != previous
                             }
 
                             var last = if (moved) origin else latest
@@ -871,6 +892,7 @@ private fun TimelineScrubber(
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 if (!change.pressed) break
                                 val delta = change.position.x - last.x
                                 if (delta != 0f) {
@@ -879,9 +901,48 @@ private fun TimelineScrubber(
                                 }
                                 last = change.position
                             }
+
+                            val wasPrecision = precision
                             precision = false
-                            dragging = false
-                            commitCallback.value(preview)
+                            val screenWidth = widthPx.coerceAtLeast(1f)
+                            val minVelocity = screenWidth * DIAL_FLING_MIN_SCREENS_PER_SECOND
+                            val maxVelocity = screenWidth * DIAL_FLING_MAX_SCREENS_PER_SECOND
+                            val stopVelocity = screenWidth * DIAL_FLING_STOP_SCREENS_PER_SECOND
+                            val releaseVelocity = runCatching { velocityTracker.calculateVelocity().x }
+                                .getOrDefault(0f)
+                                .coerceIn(-maxVelocity, maxVelocity)
+
+                            if (moved && !wasPrecision && releaseVelocity.absoluteValue >= minVelocity) {
+                                flingJob = flingScope.launch {
+                                    var velocityPxPerSecond = releaseVelocity.toDouble()
+                                    var lastFrameNanos = 0L
+                                    while (isActive && velocityPxPerSecond.absoluteValue > stopVelocity) {
+                                        withFrameNanos { frameNanos ->
+                                            if (lastFrameNanos != 0L) {
+                                                val deltaSeconds = ((frameNanos - lastFrameNanos) / 1_000_000_000.0)
+                                                    .coerceIn(0.0, 0.05)
+                                                val movedInRange = applyDelta((velocityPxPerSecond * deltaSeconds).toFloat())
+                                                if (!movedInRange) {
+                                                    velocityPxPerSecond = 0.0
+                                                } else {
+                                                    velocityPxPerSecond *= exp(-DIAL_FLING_FRICTION_PER_SECOND * deltaSeconds)
+                                                }
+                                            }
+                                            lastFrameNanos = frameNanos
+                                        }
+                                    }
+                                    if (isActive) {
+                                        applyDelta(0f, forceMapUpdate = true)
+                                        dragging = false
+                                        commitCallback.value(preview)
+                                        flingJob = null
+                                    }
+                                }
+                            } else {
+                                applyDelta(0f, forceMapUpdate = true)
+                                dragging = false
+                                commitCallback.value(preview)
+                            }
                         }
                     },
             ) {
