@@ -3,7 +3,6 @@ package kr.mooner510.map
 import android.content.Context
 import kr.mooner510.data.PreferencesStore
 import kr.mooner510.data.TrackPoint
-import kr.mooner510.data.dayKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
@@ -51,47 +50,41 @@ class OfflineMapManager(
         endDay: LocalDate,
         paddingKm: Double = 3.0,
     ) {
-        val grouped = points
-            .groupBy { LocalDate.parse(dayKey(it.timestamp)) }
-            .filterKeys { it in startDay..endDay }
-            .toSortedMap()
-
-        if (grouped.isEmpty()) {
+        if (points.isEmpty()) {
             _downloadState.value = OfflineDownloadState.Failed("선택한 기간에 저장된 위치가 없습니다.")
             return
         }
 
-        _downloadState.value = OfflineDownloadState.Downloading(
-            "기간 지도 준비 중",
-            0,
-            grouped.size.toLong(),
-            0,
+        val minLat = points.minOf { it.latitude }
+        val maxLat = points.maxOf { it.latitude }
+        val minLon = points.minOf { it.longitude }
+        val maxLon = points.maxOf { it.longitude }
+        val centerLat = (minLat + maxLat) / 2.0
+        val latPadding = paddingKm / 111.0
+        val lonPadding = paddingKm / (
+            111.0 * cos(Math.toRadians(centerLat)).let { kotlin.math.abs(it) }.coerceAtLeast(0.2)
         )
-
-        grouped.forEach { (day, dayPoints) ->
-            val minLat = dayPoints.minOf { it.latitude }
-            val maxLat = dayPoints.maxOf { it.latitude }
-            val minLon = dayPoints.minOf { it.longitude }
-            val maxLon = dayPoints.maxOf { it.longitude }
-            val centerLat = (minLat + maxLat) / 2.0
-            val latPadding = paddingKm / 111.0
-            val lonPadding = paddingKm / (111.0 * cos(Math.toRadians(centerLat)).let { kotlin.math.abs(it) }.coerceAtLeast(0.2))
-            val label = if (grouped.size == 1) {
-                "$day 이동 범위"
-            } else {
-                "$startDay ~ $endDay · $day"
-            }
-
-            download(
-                name = label,
-                north = maxLat + latPadding,
-                east = maxLon + lonPadding,
-                south = minLat - latPadding,
-                west = minLon - lonPadding,
-                minZoom = 7.0,
-                maxZoom = 16.0,
-            )
+        val label = if (startDay == endDay) {
+            "$startDay 이동 범위"
+        } else {
+            "$startDay ~ $endDay 이동 범위"
         }
+
+        _downloadState.value = OfflineDownloadState.Downloading(
+            name = label,
+            completed = 0,
+            required = 0,
+            bytes = 0,
+        )
+        download(
+            name = label,
+            north = maxLat + latPadding,
+            east = maxLon + lonPadding,
+            south = minLat - latPadding,
+            west = minLon - lonPadding,
+            minZoom = 7.0,
+            maxZoom = 16.0,
+        )
     }
 
     suspend fun download(
