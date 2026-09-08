@@ -33,6 +33,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -63,11 +64,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kr.mooner510.appGraph
 import kr.mooner510.data.AppSettings
 import kr.mooner510.data.TrackingPreset
+import kr.mooner510.map.OfflineDownloadState
 import kr.mooner510.map.OfflineRegionInfo
 import kr.mooner510.tracking.TrackingService
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen() {
@@ -77,6 +80,7 @@ fun SettingsScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val settings by graph.preferences.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
     val downloadState by graph.offlineMapManager.downloadState.collectAsStateWithLifecycle()
+    val offlineDownloading = downloadState is OfflineDownloadState.Downloading
 
     var permissionRefresh by remember { mutableIntStateOf(0) }
     var regions by remember { mutableStateOf(emptyList<OfflineRegionInfo>()) }
@@ -114,7 +118,9 @@ fun SettingsScreen() {
         graph.repository.changes.collect { refreshTrackDays() }
     }
     LaunchedEffect(downloadState) {
-        refreshRegions()
+        if (downloadState is OfflineDownloadState.Complete || downloadState is OfflineDownloadState.Failed) {
+            refreshRegions()
+        }
     }
 
     val foregroundLauncher = rememberLauncherForActivityResult(
@@ -298,7 +304,7 @@ fun SettingsScreen() {
             RoundedSection {
                 SectionHeading(
                     "오프라인 지도",
-                    "기간을 고르면 그 기간에 실제로 이동한 각 날짜의 범위 주변 지도를 저장합니다.",
+                    "선택한 기간 전체의 실제 이동 범위를 하나의 오프라인 지도 영역으로 저장합니다.",
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -317,18 +323,52 @@ fun SettingsScreen() {
                             graph.offlineMapManager.downloadTrackPeriod(trackPoints, start, end)
                         }
                     },
-                    enabled = offlineStart != null && offlineEnd != null,
+                    enabled = offlineStart != null && offlineEnd != null && !offlineDownloading,
                     modifier = Modifier.fillMaxWidth().padding(top = 9.dp),
                 ) {
                     Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Text("선택 기간 지도 저장", modifier = Modifier.padding(start = 7.dp))
+                    Text(if (offlineDownloading) "저장 중" else "선택 기간 지도 저장", modifier = Modifier.padding(start = 7.dp))
                 }
-                Text(
-                    downloadState.javaClass.simpleName.ifBlank { downloadState.toString() },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
+                when (val state = downloadState) {
+                    OfflineDownloadState.Idle -> Unit
+                    is OfflineDownloadState.Downloading -> {
+                        val progress = if (state.required > 0L) {
+                            (state.completed.toDouble() / state.required.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                        } else {
+                            null
+                        }
+                        if (progress != null) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                        }
+                        Text(
+                            buildString {
+                                append(state.name)
+                                if (progress != null) append(" · ${(progress * 100).roundToInt()}%")
+                                if (state.bytes > 0L) append(" · ${state.bytes / 1024 / 1024} MB")
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                    is OfflineDownloadState.Complete -> Text(
+                        "${state.name} 저장 완료 · ${state.bytes / 1024 / 1024} MB",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    is OfflineDownloadState.Failed -> Text(
+                        "저장 실패 · ${state.message}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 if (regions.isNotEmpty()) {
                     HorizontalDivider(Modifier.padding(vertical = 10.dp))
                     regions.forEach { region ->
