@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pipeline:
+    uses: Mooner510/workflows/.github/workflows/pipeline.yml@0637c67a895e4f1336846e875782e03150e95957
+    with:
+      components: |
+        [
+          {
+            "name": "android",
+            "type": "java-kotlin",
+            "path": ".",
+            "profile": "android"
+          }
+        ]
