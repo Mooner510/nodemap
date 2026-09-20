@@ -18,6 +18,7 @@ jobs:
     runs-on: [self-hosted, linux]
     timeout-minutes: 45
     steps:
-      - uses: Mooner510/workflows/.github/actions/cd/android-production@41c1afbcd5da911e8ec1e6e23f683ea9dc90a602
+      - name: Build and release Android app
+        uses: Mooner510/workflows/.github/actions/cd/android-production@4f579537d18893be2dee87640be35d7f91bb66c8
         with:
           working-directory: .
