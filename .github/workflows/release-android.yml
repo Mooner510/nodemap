@@ -1,0 +1,23 @@
+name: Release Android
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-nodemap-android
+  cancel-in-progress: false
+
+jobs:
+  android:
+    environment: production
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 45
+    steps:
+      - uses: Mooner510/workflows/.github/actions/cd/android-production@41c1afbcd5da911e8ec1e6e23f683ea9dc90a602
+        with:
+          working-directory: .
