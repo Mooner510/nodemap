@@ -64,3 +64,20 @@ DB에는 검색용 id/timestamp/day_key/event type만 평문으로 두고 실제
 - 기본 온라인 style: OpenFreeMap Liberty
 
 실제 위치, 전화번호, 메시지, 알림, 녹음, signing key, OAuth secret, `.nodemap` 백업은 커밋하지 마세요.
+
+
+## CI/CD
+
+GitHub Actions uses the shared `Mooner510/workflows` Android pipeline. Language setup, Android SDK, lint, unit tests, and debug build are centralized.
+
+Production release uses the shared Android production action with host-managed signing material:
+
+```text
+/opt/stacks/projects/nodemap/android/
+├─ deploy.env
+└─ secret/android/
+   ├─ release.jks
+   └─ signing.env
+```
+
+`NODEMAP_BACKUP_SERVER_URL` and `NODEMAP_GOOGLE_SERVER_CLIENT_ID` belong in `android/deploy.env`; the workflow does not duplicate them in GitHub Secrets/Variables. APK signing is owned by the shared Android release contract.
