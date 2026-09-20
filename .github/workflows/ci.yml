@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   pipeline:
-    uses: Mooner510/workflows/.github/workflows/pipeline.yml@b4e9fa4cfc47b2e6a49b44b7c53536eb0f389c18
+    uses: Mooner510/workflows/.github/workflows/pipeline.yml@41c1afbcd5da911e8ec1e6e23f683ea9dc90a602
     with:
       components: |
         [
