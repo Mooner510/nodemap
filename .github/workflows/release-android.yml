@@ -19,6 +19,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Build and release Android app
-        uses: Mooner510/workflows/.github/actions/cd/android-production@4f579537d18893be2dee87640be35d7f91bb66c8
+        uses: Mooner510/workflows/.github/actions/cd/android-production@v1
         with:
           working-directory: .
