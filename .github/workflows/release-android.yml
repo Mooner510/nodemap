@@ -1,12 +1,15 @@
 name: Release Android
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Optional semantic version (MAJOR.MINOR.PATCH)
+        required: false
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: production-nodemap-android
@@ -14,11 +17,13 @@ concurrency:
 
 jobs:
   android:
+    if: github.actor == 'Mooner510' && github.triggering_actor == 'Mooner510'
     environment: production
     runs-on: [self-hosted, linux]
     timeout-minutes: 45
     steps:
-      - name: Build and release Android app
+      - name: Build Android app
         uses: Mooner510/workflows/.github/actions/cd/android-production@v1
         with:
           working-directory: .
+          version: ${{ inputs.version }}
