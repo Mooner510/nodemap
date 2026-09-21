@@ -11,7 +11,7 @@ permissions:
 jobs:
   pipeline:
     name: CI
-    uses: Mooner510/workflows/.github/workflows/pipeline.yml@4f579537d18893be2dee87640be35d7f91bb66c8
+    uses: Mooner510/workflows/.github/workflows/pipeline.yml@v1
     with:
       components: |
         [
