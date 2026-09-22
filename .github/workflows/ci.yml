@@ -22,3 +22,5 @@ jobs:
             "profile": "android"
           }
         ]
+      # Android has no deploy_services entry: dev pushes run CI only.
+      # Production Android release remains explicit/manual through deploy.yml and android-production.
