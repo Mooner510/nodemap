@@ -4,23 +4,20 @@ on:
   pull_request:
   push:
     branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      diff_base:
+        description: Optional ancestor SHA for maintenance-triggered CI.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
-  pipeline:
+  ci:
     name: CI
-    uses: Mooner510/workflows/.github/workflows/pipeline.yml@v1
+    uses: Mooner510/workflows/.github/workflows/project-ci.yml@v1
     with:
-      components: |
-        [
-          {
-            "name": "android",
-            "type": "java-kotlin",
-            "path": ".",
-            "profile": "android"
-          }
-        ]
-      # Android has no deploy_services entry: dev pushes run CI only.
-      # Production Android release remains explicit/manual through deploy.yml and android-production.
+      diff_base: ${{ inputs.diff_base || '' }}
