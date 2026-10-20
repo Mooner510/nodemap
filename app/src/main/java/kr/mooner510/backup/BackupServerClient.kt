@@ -29,7 +29,12 @@ class BackupServerClient(rawBaseUrl: String) {
         }
     }
 
-    suspend fun upload(idToken: String, file: File, formatVersion: Int): RemoteBackupMetadata = withContext(Dispatchers.IO) {
+    suspend fun upload(
+        idToken: String,
+        file: File,
+        formatVersion: Int,
+        onProgress: BackupProgressListener = {},
+    ): RemoteBackupMetadata = withContext(Dispatchers.IO) {
         require(file.isFile && file.length() > 0L)
         val connection = open("/v1/backup", "PUT", idToken).apply {
             doOutput = true
@@ -39,7 +44,9 @@ class BackupServerClient(rawBaseUrl: String) {
             readTimeout = 60_000
         }
         connection.outputStream.buffered().use { output ->
-            file.inputStream().buffered().use { input -> input.copyTo(output) }
+            ProgressInputStream(file.inputStream(), file.length()) { sent, total ->
+                onProgress(BackupProgress("서버로 업로드 중", sent.toFloat() / total, "${formatBackupBytes(sent)} / ${formatBackupBytes(total)}"))
+            }.buffered().use { input -> input.copyTo(output) }
         }
         connection.useResponse { code, body ->
             requireSuccess(code, body)
@@ -51,6 +58,7 @@ class BackupServerClient(rawBaseUrl: String) {
         idToken: String,
         destination: File,
         metadata: RemoteBackupMetadata,
+        onProgress: BackupProgressListener = {},
     ) = withContext(Dispatchers.IO) {
         val connection = open("/v1/backup/content", "GET", idToken).apply {
             readTimeout = 5 * 60_000
@@ -66,12 +74,19 @@ class BackupServerClient(rawBaseUrl: String) {
             connection.inputStream.buffered().use { input ->
                 destination.outputStream().buffered().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var received = 0L
+                    var lastReport = 0L
                     while (true) {
                         val read = input.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
                         digest.update(buffer, 0, read)
                         output.write(buffer, 0, read)
+                        received += read
+                        if (received - lastReport >= 128 * 1024L) {
+                            lastReport = received
+                            onProgress(BackupProgress("서버에서 다운로드 중", (received.toFloat() / metadata.sizeBytes).coerceIn(0f, 1f), "${formatBackupBytes(received)} / ${formatBackupBytes(metadata.sizeBytes)}"))
+                        }
                     }
                 }
             }

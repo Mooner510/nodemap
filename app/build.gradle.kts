@@ -12,6 +12,20 @@ val googleServerClientId = providers.gradleProperty("NODEMAP_GOOGLE_SERVER_CLIEN
     .orElse(providers.environmentVariable("NODEMAP_GOOGLE_SERVER_CLIENT_ID"))
     .orElse("")
 
+// The UI lives in apps/ui (Vite + React). Its production bundle is packaged as assets under "ui/".
+// Pass -PskipWebUi to reuse an existing apps/ui/dist (e.g. when node isn't available).
+val webUiDir = rootProject.layout.projectDirectory.dir("apps/ui")
+val buildWebUi = tasks.register<Exec>("buildWebUi") {
+    group = "build"
+    description = "Builds the React UI bundle that is embedded as app assets."
+    workingDir = webUiDir.asFile
+    inputs.files(webUiDir.file("package.json"), webUiDir.file("package-lock.json"), webUiDir.file("index.html"), webUiDir.file("vite.config.ts"), webUiDir.file("tsconfig.json"))
+    inputs.dir(webUiDir.dir("src"))
+    outputs.dir(webUiDir.dir("dist"))
+    // A login shell so nvm/Homebrew node is on PATH when Gradle is launched from Android Studio.
+    commandLine("sh", "-lc", "[ -d node_modules ] || npm ci --no-audit --no-fund; npm run build")
+}
+
 android {
     namespace = "kr.mooner510"
     compileSdk = 36
@@ -31,10 +45,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    sourceSets.getByName("main").assets.srcDir(webUiDir.dir("dist"))
     packaging {
         resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1")
     }
     buildTypes {
+        debug {
+            // Installs side by side with the release app (different package + signing key).
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -43,6 +63,12 @@ android {
                 "proguard-rules.pro",
             )
         }
+    }
+}
+
+if (!providers.gradleProperty("skipWebUi").isPresent) {
+    tasks.configureEach {
+        if (name.startsWith("merge") && name.endsWith("Assets")) dependsOn(buildWebUi)
     }
 }
 
@@ -62,6 +88,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.fragment:fragment-ktx:1.8.9")
     implementation("androidx.credentials:credentials:1.6.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.6.0")

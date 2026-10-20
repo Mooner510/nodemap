@@ -3,6 +3,7 @@ package kr.mooner510.data
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
@@ -17,7 +18,7 @@ class NodeMapRepository(
     private val crypto: CryptoManager,
     val attachmentStore: AttachmentStore,
 ) {
-    private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
+    private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val changes = _changes.asSharedFlow()
     private val pinInitMutex = Mutex()
     @Volatile private var pinConfigurationReady = false
@@ -85,8 +86,48 @@ class NodeMapRepository(
     }
 
     suspend fun insertEvent(event: TimelineEvent) = withContext(Dispatchers.IO) {
+        writeEvent(db.writableDatabase, event)
+        _changes.tryEmit(Unit)
+    }
+
+    /** Single transaction + single change notification; used by restore. */
+    suspend fun insertTrackPoints(points: List<TrackPoint>) = withContext(Dispatchers.IO) {
+        if (points.isEmpty()) return@withContext
+        val writable = db.writableDatabase
+        writable.beginTransaction()
+        try {
+            points.forEach { point ->
+                val values = ContentValues().apply {
+                    put("timestamp", point.timestamp)
+                    put("day_key", dayKey(point.timestamp))
+                    put("payload", crypto.encrypt(point.toJson().toString().toByteArray()))
+                }
+                writable.insertOrThrow("track_points", null, values)
+            }
+            writable.setTransactionSuccessful()
+        } finally {
+            writable.endTransaction()
+        }
+        _changes.tryEmit(Unit)
+    }
+
+    suspend fun insertEvents(events: List<TimelineEvent>) = withContext(Dispatchers.IO) {
+        if (events.isEmpty()) return@withContext
+        val writable = db.writableDatabase
+        writable.beginTransaction()
+        try {
+            events.forEach { writeEvent(writable, it) }
+            writable.setTransactionSuccessful()
+        } finally {
+            writable.endTransaction()
+        }
+        _changes.tryEmit(Unit)
+    }
+
+    // UPDATE-then-INSERT instead of CONFLICT_REPLACE: REPLACE deletes the row first and
+    // ON DELETE CASCADE would silently drop the event's attachments on every update.
+    private fun writeEvent(writable: SQLiteDatabase, event: TimelineEvent) {
         val values = ContentValues().apply {
-            put("id", event.id)
             put("timestamp", event.timestamp)
             put("day_key", dayKey(event.timestamp))
             put("type", event.type.name)
@@ -94,8 +135,10 @@ class NodeMapRepository(
             put("pin_type_id", event.pinTypeId)
             put("payload", crypto.encrypt(event.toJson().toString().toByteArray()))
         }
-        db.writableDatabase.insertWithOnConflict("events", null, values, SQLiteDatabase.CONFLICT_REPLACE)
-        _changes.tryEmit(Unit)
+        if (writable.update("events", values, "id = ?", arrayOf(event.id)) == 0) {
+            values.put("id", event.id)
+            writable.insertOrThrow("events", null, values)
+        }
     }
 
     suspend fun updateEvent(event: TimelineEvent) = insertEvent(event)
@@ -675,7 +718,7 @@ class NodeMapRepository(
             null,
             "timestamp ASC",
         )
-        return db.run {
+        val rows = db.run {
             cursor.mapRows { row ->
                 val id = row.getString(0)
                 val decoded = TimelineEvent.fromJson(
@@ -687,10 +730,22 @@ class NodeMapRepository(
                 decoded.copy(
                     pinRuleId = row.strOrNull(3) ?: decoded.pinRuleId,
                     pinTypeId = row.strOrNull(4) ?: decoded.pinTypeId,
-                    attachmentIds = queryAttachments("event_id = ?", arrayOf(id)).map { it.id },
                 )
             }
         }
+        if (rows.isEmpty()) return rows
+        val attachmentIds = attachmentIdsByEvent(selection, args)
+        return rows.map { it.copy(attachmentIds = attachmentIds[it.id].orEmpty()) }
+    }
+
+    private fun attachmentIdsByEvent(selection: String?, args: Array<String>?): Map<String, List<String>> {
+        val where = selection?.let { "event_id IN (SELECT id FROM events WHERE $it)" }
+        val cursor = db.readableDatabase.query(
+            "attachments", arrayOf("id", "event_id"), where, args, null, null, "created_at ASC",
+        )
+        val result = HashMap<String, MutableList<String>>()
+        cursor.use { while (it.moveToNext()) result.getOrPut(it.getString(1)) { mutableListOf() }.add(it.getString(0)) }
+        return result
     }
 
     private fun queryAttachments(selection: String?, args: Array<String>?): List<AttachmentRecord> {

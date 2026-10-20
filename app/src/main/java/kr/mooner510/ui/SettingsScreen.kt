@@ -46,6 +46,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,19 +56,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kr.mooner510.BiometricLock
 import kr.mooner510.appGraph
+import kr.mooner510.backup.BackupProgress
 import kr.mooner510.data.AppSettings
 import kr.mooner510.data.TrackingPreset
 import kr.mooner510.map.OfflineDownloadState
 import kr.mooner510.map.OfflineRegionInfo
 import kr.mooner510.tracking.TrackingService
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.math.roundToInt
@@ -92,6 +99,8 @@ fun SettingsScreen() {
     var backupAction by remember { mutableStateOf<BackupAction?>(null) }
     var password by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var backupProgress by remember { mutableStateOf<BackupProgress?>(null) }
+    var backupStartedAt by remember { mutableLongStateOf(0L) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -115,7 +124,8 @@ fun SettingsScreen() {
         refreshTrackDays()
     }
     LaunchedEffect(Unit) {
-        graph.repository.changes.collect { refreshTrackDays() }
+        // changes fires on every recorded track point; conflate so bursts don't queue DB reads.
+        graph.repository.changes.conflate().collect { refreshTrackDays() }
     }
     LaunchedEffect(downloadState) {
         if (downloadState is OfflineDownloadState.Complete || downloadState is OfflineDownloadState.Failed) {
@@ -127,40 +137,65 @@ fun SettingsScreen() {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
         permissionRefresh += 1
-        if (hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
-            hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
-        ) {
-            TrackingService.start(context)
+        if (hasLocationPermission(context)) {
+            scope.launch {
+                if (graph.preferences.current().trackingEnabled) TrackingService.start(context)
+            }
         }
     }
     val permissionEpoch = permissionRefresh
 
+    val enrollLockLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (BiometricLock.isAvailable(context)) {
+            scope.launch { graph.preferences.setBiometricLockEnabled(true) }
+        }
+    }
     val sensitiveLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { permissionRefresh += 1 }
     val createBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri ->
+        val chars = password.toCharArray()
+        password = ""
         if (uri != null) {
             scope.launch {
-                runCatching { graph.backupManager.export(uri, password.toCharArray()) }
+                message = null
+                backupStartedAt = System.currentTimeMillis()
+                backupProgress = BackupProgress("준비 중", 0f)
+                // Don't abort a half-written backup if the user leaves this screen.
+                runCatching { withContext(NonCancellable) { graph.backupManager.export(uri, chars) { backupProgress = it } } }
                     .onSuccess { message = "암호화 백업을 저장했습니다." }
                     .onFailure { message = "백업 실패: ${it.message}" }
-                password = ""
+                backupProgress = null
+                chars.fill('\u0000')
             }
+        } else {
+            chars.fill('\u0000')
         }
     }
     val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val chars = password.toCharArray()
+        password = ""
         if (uri != null) {
             scope.launch {
-                runCatching { graph.backupManager.restore(uri, password.toCharArray()) }
-                    .onSuccess {
+                message = null
+                backupStartedAt = System.currentTimeMillis()
+                backupProgress = BackupProgress("준비 중", 0f)
+                // A restore interrupted by navigation could leave the database half-replaced.
+                runCatching {
+                    withContext(NonCancellable) {
+                        graph.backupManager.restore(uri, chars) { backupProgress = it }
                         graph.routineShortcutManager.refresh()
-                        message = "백업을 복원했습니다."
                     }
+                }
+                    .onSuccess { message = "백업을 복원했습니다." }
                     .onFailure { message = "복원 실패: 비밀번호 또는 파일을 확인하세요." }
-                password = ""
+                backupProgress = null
+                chars.fill('\u0000')
             }
+        } else {
+            chars.fill('\u0000')
         }
     }
 
@@ -182,7 +217,12 @@ fun SettingsScreen() {
                 ) { enabled ->
                     scope.launch {
                         graph.preferences.setTrackingEnabled(enabled)
-                        if (enabled) TrackingService.start(context) else TrackingService.stop(context)
+                        // Starting a location foreground service without permission crashes the app.
+                        if (enabled) {
+                            if (hasLocationPermission(context)) TrackingService.start(context)
+                        } else {
+                            TrackingService.stop(context)
+                        }
                     }
                 }
                 SettingToggleRow(
@@ -202,7 +242,14 @@ fun SettingsScreen() {
                     title = "앱 잠금",
                     description = "생체인증 또는 기기 잠금으로 보호",
                     checked = settings.biometricLockEnabled,
-                ) { scope.launch { graph.preferences.setBiometricLockEnabled(it) } }
+                ) { enabled ->
+                    if (enabled && !BiometricLock.isAvailable(context)) {
+                        message = "앱 잠금을 쓰려면 생체 정보 또는 화면 잠금을 등록해야 합니다."
+                        enrollLockLauncher.launch(BiometricLock.enrollIntent())
+                    } else {
+                        scope.launch { graph.preferences.setBiometricLockEnabled(enabled) }
+                    }
+                }
 
                 Text(
                     "위치 정확도 / 기록 빈도",
@@ -280,7 +327,7 @@ fun SettingsScreen() {
                 PermissionActionRow(
                     icon = Icons.Rounded.Notifications,
                     title = "알림 접근",
-                    granted = notificationListenerGranted(context, permissionEpoch),
+                    granted = remember(permissionEpoch) { notificationListenerGranted(context, permissionEpoch) },
                 ) {
                     context.startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 }
@@ -319,8 +366,10 @@ fun SettingsScreen() {
                             val zone = ZoneId.systemDefault()
                             val from = start.atStartOfDay(zone).toInstant().toEpochMilli()
                             val until = end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-                            val trackPoints = graph.repository.trackPointsBetween(from, until)
-                            graph.offlineMapManager.downloadTrackPeriod(trackPoints, start, end)
+                            runCatching {
+                                val trackPoints = graph.repository.trackPointsBetween(from, until)
+                                graph.offlineMapManager.downloadTrackPeriod(trackPoints, start, end)
+                            }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
                         }
                     },
                     enabled = offlineStart != null && offlineEnd != null && !offlineDownloading,
@@ -398,12 +447,13 @@ fun SettingsScreen() {
                     Modifier.fillMaxWidth().padding(top = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Button(onClick = { backupAction = BackupAction.EXPORT }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = { backupAction = BackupAction.EXPORT }, enabled = backupProgress == null, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Rounded.Backup, contentDescription = null, modifier = Modifier.size(20.dp))
                         Text("백업", modifier = Modifier.padding(start = 6.dp))
                     }
-                    OutlinedButton(onClick = { backupAction = BackupAction.RESTORE }, modifier = Modifier.weight(1f)) { Text("복원") }
+                    OutlinedButton(onClick = { backupAction = BackupAction.RESTORE }, enabled = backupProgress == null, modifier = Modifier.weight(1f)) { Text("복원") }
                 }
+                backupProgress?.let { BackupProgressPanel(it, backupStartedAt, Modifier.padding(top = 12.dp)) }
                 message?.let {
                     Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
                 }
@@ -420,7 +470,7 @@ fun SettingsScreen() {
             onDismiss = { pickStart = false },
             onSelected = { day ->
                 offlineStart = day
-                if (offlineEnd == null || offlineEnd!! < day) offlineEnd = day
+                if (offlineEnd.let { it == null || it < day }) offlineEnd = day
                 pickStart = false
             },
         )
@@ -432,7 +482,7 @@ fun SettingsScreen() {
             onDismiss = { pickEnd = false },
             onSelected = { day ->
                 offlineEnd = day
-                if (offlineStart == null || offlineStart!! > day) offlineStart = day
+                if (offlineStart.let { it == null || it > day }) offlineStart = day
                 pickEnd = false
             },
         )
@@ -446,9 +496,10 @@ fun SettingsScreen() {
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("백업 비밀번호") },
+                    label = { Text("백업 비밀번호 (8자 이상)") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
                 )
             },
             confirmButton = {
@@ -462,7 +513,8 @@ fun SettingsScreen() {
                             openBackup.launch(arrayOf("application/octet-stream", "*/*"))
                         }
                     },
-                    enabled = password.isNotBlank(),
+                    // BackupManager rejects passwords shorter than 8 chars; check before opening the picker.
+                    enabled = password.length >= 8,
                 ) { Text(if (backupAction == BackupAction.EXPORT) "저장" else "파일 선택") }
             },
             dismissButton = {
@@ -522,6 +574,10 @@ private fun hasPermission(context: android.content.Context, permission: String, 
     refresh.hashCode()
     return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 }
+
+private fun hasLocationPermission(context: android.content.Context): Boolean =
+    hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
+        hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
 
 private fun notificationListenerGranted(context: android.content.Context, refresh: Int): Boolean {
     refresh.hashCode()

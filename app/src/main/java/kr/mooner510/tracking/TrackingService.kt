@@ -13,6 +13,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.location.LocationRequest
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -24,6 +25,7 @@ import kr.mooner510.data.TrackPoint
 import kr.mooner510.data.TrackingPreset
 import kr.mooner510.events.CallLogObserver
 import kr.mooner510.events.MessageObserver
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,7 +37,9 @@ import java.util.concurrent.Executor
 import kotlin.math.max
 
 class TrackingService : Service(), LocationListener {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error -> Log.w("TrackingService", "Background task failed", error) },
+    )
     private val graph get() = appGraph
 
     private lateinit var locationManager: LocationManager
@@ -47,7 +51,9 @@ class TrackingService : Service(), LocationListener {
     private var lastLocation: Location? = null
     private var lastMovementAt = 0L
     private var settingsJob: Job? = null
-    private val executor = Executor { command -> scope.launch { command.run() } }
+    // All tracking state is touched only from this single-parallelism dispatcher.
+    private val serial = Dispatchers.IO.limitedParallelism(1)
+    private val executor = Executor { command -> scope.launch(serial) { command.run() } }
 
     override fun onCreate() {
         super.onCreate()
@@ -60,6 +66,14 @@ class TrackingService : Service(), LocationListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val hasLocationPermission =
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasLocationPermission) {
+            // A location-type foreground service without permission throws SecurityException.
+            stopSelf()
+            return START_NOT_STICKY
+        }
         ServiceCompat.startForeground(
             this,
             510,
@@ -68,7 +82,7 @@ class TrackingService : Service(), LocationListener {
         )
 
         settingsJob?.cancel()
-        settingsJob = scope.launch {
+        settingsJob = scope.launch(serial) {
             graph.preferences.settings.collect { settings ->
                 if (!settings.trackingEnabled) {
                     stopSelf()
@@ -98,20 +112,22 @@ class TrackingService : Service(), LocationListener {
         }
 
         lastLocation = location
-        scope.launch {
-            graph.repository.insertTrackPoint(
-                TrackPoint(
-                    timestamp = location.time.takeIf { it > 0 } ?: now,
-                    latitude = location.latitude,
-                    longitude = location.longitude,
-                    accuracyMeters = location.accuracy,
-                    altitudeMeters = location.altitude.takeIf { location.hasAltitude() },
-                    speedMps = location.speed.takeIf { location.hasSpeed() },
-                    bearingDegrees = location.bearing.takeIf { location.hasBearing() },
-                    provider = location.provider,
-                    isMock = location.isMock,
-                ),
-            )
+        scope.launch(serial) {
+            runCatching {
+                graph.repository.insertTrackPoint(
+                    TrackPoint(
+                        timestamp = location.time.takeIf { it > 0 } ?: now,
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        accuracyMeters = location.accuracy,
+                        altitudeMeters = location.altitude.takeIf { location.hasAltitude() },
+                        speedMps = location.speed.takeIf { location.hasSpeed() },
+                        bearingDegrees = location.bearing.takeIf { location.hasBearing() },
+                        provider = location.provider,
+                        isMock = location.isMock,
+                    ),
+                )
+            }.onFailure { return@launch }
             updateNotification("정확도 ±${max(1, location.accuracy.toInt())}m · 방금 기록")
         }
     }
@@ -183,12 +199,12 @@ class TrackingService : Service(), LocationListener {
             (location.hasSpeed() && location.speed >= 0.8f) ||
                 (lastLocation != null && location.distanceTo(lastLocation!!) >= 12f)
 
-        if (moved) lastMovementAt = now
+        if (moved || lastMovementAt == 0L) lastMovementAt = now
 
-        val nextStationary = lastMovementAt > 0 && now - lastMovementAt >= 180_000
+        val nextStationary = now - lastMovementAt >= 180_000
         if (nextStationary != stationary) {
             stationary = nextStationary
-            scope.launch {
+            scope.launch(serial) {
                 requestUpdates(
                     profileFor(graph.preferences.current().trackingPreset, stationary),
                 )
@@ -258,6 +274,11 @@ class TrackingService : Service(), LocationListener {
 
     companion object {
         fun start(context: android.content.Context) {
+            // startForegroundService() obliges the service to call startForeground() quickly, which
+            // is impossible (SecurityException) for a location service without permission.
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, TrackingService::class.java),

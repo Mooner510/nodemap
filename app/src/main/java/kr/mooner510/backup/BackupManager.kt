@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.io.*
 import java.security.SecureRandom
 import java.time.Instant
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -25,11 +26,27 @@ class BackupManager(
     private val repository: NodeMapRepository,
     private val attachmentStore: AttachmentStore,
 ) {
-    suspend fun export(destination: Uri, password: CharArray) = withContext(Dispatchers.IO) {
+    suspend fun export(
+        destination: Uri,
+        password: CharArray,
+        onProgress: BackupProgressListener = {},
+    ) = withContext(Dispatchers.IO) {
         require(password.size >= 8) { "백업 비밀번호는 8자 이상이어야 합니다." }
         val temp = File.createTempFile("nodemap-export-", ".zip", context.cacheDir)
         try {
-            ZipOutputStream(BufferedOutputStream(FileOutputStream(temp))).use { zip ->
+            onProgress(BackupProgress("데이터 읽는 중", 0f, "위치 기록"))
+            val points = repository.allTrackPoints()
+            onProgress(BackupProgress("데이터 읽는 중", 0.06f, "이벤트"))
+            val events = repository.allEvents()
+            onProgress(BackupProgress("데이터 읽는 중", 0.1f, "설정과 첨부 목록"))
+            val rules = repository.notificationRules()
+            val templates = repository.pinTemplates()
+            val pinTypes = repository.allPinTypes()
+            val pinRules = repository.allPinRules()
+            val attachments = repository.allAttachments()
+
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(temp), BUFFER)).use { zip ->
+                zip.setLevel(Deflater.BEST_SPEED)
                 writeText(
                     zip,
                     "manifest.json",
@@ -39,64 +56,67 @@ class BackupManager(
                         put("createdAt", Instant.now().toEpochMilli())
                     }.toString(),
                 )
-                writeLines(zip, "track_points.jsonl", repository.allTrackPoints().map { it.exportJson().toString() })
-                writeLines(zip, "events.jsonl", repository.allEvents().map { it.exportJson().toString() })
-                writeLines(
-                    zip,
-                    "notification_rules.jsonl",
-                    repository.notificationRules().map {
-                        JSONObject().apply { put("id", it.id); put("payload", it.toJson()) }.toString()
-                    },
-                )
-                writeLines(
-                    zip,
-                    "pin_templates.jsonl",
-                    repository.pinTemplates().map {
-                        JSONObject().apply { put("id", it.id); put("payload", it.toJson()) }.toString()
-                    },
-                )
-                writeLines(
-                    zip,
-                    "pin_types.jsonl",
-                    repository.allPinTypes().map {
-                        JSONObject().apply { put("id", it.id); put("payload", it.toJson()) }.toString()
-                    },
-                )
-                writeLines(
-                    zip,
-                    "pin_rules.jsonl",
-                    repository.allPinRules().map {
-                        JSONObject().apply { put("id", it.id); put("payload", it.toJson()) }.toString()
-                    },
-                )
-                val attachments = repository.allAttachments()
-                writeLines(zip, "attachments.jsonl", attachments.map { it.exportJson().toString() })
-                attachments.forEach { attachment ->
+                writeLines(zip, "track_points.jsonl", points, { it.exportJson().toString() }) { done ->
+                    onProgress(BackupProgress("데이터 정리 중", 0.12f + 0.2f * done / points.size, "위치 기록 $done / ${points.size}"))
+                }
+                writeLines(zip, "events.jsonl", events, { it.exportJson().toString() }) { done ->
+                    onProgress(BackupProgress("데이터 정리 중", 0.32f + 0.05f * done / events.size, "이벤트 $done / ${events.size}"))
+                }
+                val idPayload = { id: String, payload: JSONObject -> JSONObject().apply { put("id", id); put("payload", payload) }.toString() }
+                writeLines(zip, "notification_rules.jsonl", rules, { idPayload(it.id, it.toJson()) })
+                writeLines(zip, "pin_templates.jsonl", templates, { idPayload(it.id, it.toJson()) })
+                writeLines(zip, "pin_types.jsonl", pinTypes, { idPayload(it.id, it.toJson()) })
+                writeLines(zip, "pin_rules.jsonl", pinRules, { idPayload(it.id, it.toJson()) })
+                writeLines(zip, "attachments.jsonl", attachments, { it.exportJson().toString() })
+                // Attachments are already-compressed media; deflating them only burns CPU.
+                zip.setLevel(Deflater.NO_COMPRESSION)
+                attachments.forEachIndexed { index, attachment ->
+                    onProgress(
+                        BackupProgress("첨부파일 담는 중", 0.37f + 0.18f * index / attachments.size, "첨부파일 ${index + 1} / ${attachments.size}"),
+                    )
                     openAttachment(attachment)?.use { input ->
                         zip.putNextEntry(ZipEntry("attachments/${attachment.id}"))
-                        input.copyTo(zip)
+                        input.copyTo(zip, BUFFER)
                         zip.closeEntry()
                     }
                 }
             }
-            context.contentResolver.openOutputStream(destination, "w")!!.use { output ->
-                FileInputStream(temp).use { input -> encryptPortable(input, output, password) }
+            val sink = context.contentResolver.openOutputStream(destination, "w")
+                ?: throw IOException("백업 파일을 열 수 없습니다.")
+            val total = temp.length()
+            sink.use { output ->
+                ProgressInputStream(FileInputStream(temp), total) { read, size ->
+                    onProgress(BackupProgress("암호화하여 저장 중", 0.55f + 0.45f * (read.toFloat() / size).coerceIn(0f, 1f), "${formatBackupBytes(read)} / ${formatBackupBytes(size)}"))
+                }.use { input -> encryptPortable(input, output.buffered(BUFFER), password) }
             }
+            onProgress(BackupProgress("완료", 1f))
         } finally {
             password.fill('\u0000')
             temp.delete()
         }
     }
 
-    suspend fun restore(source: Uri, password: CharArray) = withContext(Dispatchers.IO) {
+    suspend fun restore(
+        source: Uri,
+        password: CharArray,
+        onProgress: BackupProgressListener = {},
+    ) = withContext(Dispatchers.IO) {
         require(password.size >= 8)
         val temp = File.createTempFile("nodemap-restore-", ".zip", context.cacheDir)
         val unpack = File(context.cacheDir, "nodemap-restore-${System.nanoTime()}").apply { mkdirs() }
         try {
-            context.contentResolver.openInputStream(source)!!.use { input ->
-                FileOutputStream(temp).use { output -> decryptPortable(input, output, password) }
+            val total = runCatching { context.contentResolver.openAssetFileDescriptor(source, "r")?.use { it.length } }.getOrNull() ?: -1L
+            onProgress(BackupProgress("암호 해제 중", 0f, "비밀번호 키 생성"))
+            val stream = context.contentResolver.openInputStream(source)
+                ?: throw IOException("백업 파일을 열 수 없습니다.")
+            ProgressInputStream(stream, total) { read, size ->
+                val f = if (size > 0) (read.toFloat() / size).coerceIn(0f, 1f) else 0f
+                onProgress(BackupProgress("암호 해제 중", 0.35f * f, if (size > 0) "${formatBackupBytes(read)} / ${formatBackupBytes(size)}" else formatBackupBytes(read)))
+            }.use { input ->
+                FileOutputStream(temp).use { output -> decryptPortable(input, output.buffered(BUFFER), password) }
             }
-            unzipSafely(temp, unpack)
+            unzipSafely(temp, unpack) { f -> onProgress(BackupProgress("압축 해제 중", 0.35f + 0.1f * f)) }
+            onProgress(BackupProgress("데이터 분석 중", 0.45f))
             val manifest = JSONObject(File(unpack, "manifest.json").readText())
             val version = manifest.optInt("version")
             require(manifest.optString("format") == "nodemap" && version in 1..2) {
@@ -127,18 +147,30 @@ class BackupManager(
             }
             val attachments = readJsonLines(File(unpack, "attachments.jsonl")).map(::attachmentFromExport)
 
+            onProgress(BackupProgress("기존 데이터 교체 중", 0.5f, "기존 데이터 삭제"))
             repository.clearForRestore()
-            points.forEach { repository.insertTrackPoint(it.copy(id = 0)) }
-            events.forEach { repository.insertEvent(it) }
+            points.chunked(RESTORE_CHUNK).forEachIndexed { index, chunk ->
+                val done = minOf((index + 1) * RESTORE_CHUNK, points.size)
+                onProgress(BackupProgress("위치 기록 복원 중", 0.5f + 0.3f * (index * RESTORE_CHUNK).toFloat() / points.size, "$done / ${points.size}"))
+                repository.insertTrackPoints(chunk)
+            }
+            onProgress(BackupProgress("이벤트 복원 중", 0.8f, "${events.size}개"))
+            repository.insertEvents(events)
+            val eventIds = events.mapTo(HashSet()) { it.id }
 
             // Keep v1 compatibility first. v2 entities are restored afterwards so their exact
             // type/rule configuration wins over any legacy migration with the same IDs.
+            onProgress(BackupProgress("설정 복원 중", 0.85f))
             legacyRules.forEach { repository.upsertNotificationRule(it) }
             legacyTemplates.forEach { repository.upsertPinTemplate(it) }
             pinTypes.forEach { repository.restorePinType(it) }
             pinRules.forEach { repository.restorePinRule(it) }
 
-            attachments.forEach { record ->
+            // An attachment whose event is missing would violate the FK and abort a restore that has
+            // already wiped the database, so skip such orphans.
+            val restorable = attachments.filter { it.eventId in eventIds }
+            restorable.forEachIndexed { index, record ->
+                onProgress(BackupProgress("첨부파일 복원 중", 0.88f + 0.12f * index / restorable.size, "${index + 1} / ${restorable.size}"))
                 val file = File(unpack, "attachments/${record.id}")
                 if (file.isFile) {
                     file.inputStream().use {
@@ -154,6 +186,7 @@ class BackupManager(
                     )
                 }
             }
+            onProgress(BackupProgress("완료", 1f))
         } finally {
             password.fill('\u0000')
             temp.delete()
@@ -182,19 +215,20 @@ class BackupManager(
         output.write(salt)
         output.write(iv.size)
         output.write(iv)
-        CipherOutputStream(output, cipher).use { input.copyTo(it) }
+        CipherOutputStream(output, cipher).use { input.copyTo(it, BUFFER) }
     }
 
     private fun decryptPortable(input: InputStream, output: OutputStream, password: CharArray) {
-        val buffered = BufferedInputStream(input)
-        require(buffered.readNBytes(MAGIC.size).contentEquals(MAGIC))
+        val buffered = BufferedInputStream(input, BUFFER)
+        require(buffered.readExactly(MAGIC.size).contentEquals(MAGIC))
         require(buffered.read() == 1)
-        val salt = buffered.readNBytes(buffered.read().also { require(it in 16..64) })
-        val iv = buffered.readNBytes(buffered.read().also { require(it in 12..32) })
+        val salt = buffered.readExactly(buffered.read().also { require(it in 16..64) })
+        val iv = buffered.readExactly(buffered.read().also { require(it in 12..32) })
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
             init(Cipher.DECRYPT_MODE, deriveKey(password, salt), GCMParameterSpec(128, iv))
         }
-        CipherInputStream(buffered, cipher).use { it.copyTo(output) }
+        CipherInputStream(buffered, cipher).use { it.copyTo(output, BUFFER) }
+        output.flush()
     }
 
     private fun deriveKey(password: CharArray, salt: ByteArray): SecretKeySpec {
@@ -210,8 +244,22 @@ class BackupManager(
         zip.closeEntry()
     }
 
-    private fun writeLines(zip: ZipOutputStream, name: String, lines: List<String>) =
-        writeText(zip, name, lines.joinToString("\n"))
+    private fun <T> writeLines(
+        zip: ZipOutputStream,
+        name: String,
+        items: List<T>,
+        render: (T) -> String,
+        onItems: (done: Int) -> Unit = {},
+    ) {
+        zip.putNextEntry(ZipEntry(name))
+        items.forEachIndexed { index, item ->
+            if (index > 0) zip.write('\n'.code)
+            zip.write(render(item).toByteArray())
+            if ((index + 1) % 1000 == 0) onItems(index + 1)
+        }
+        zip.closeEntry()
+        onItems(items.size)
+    }
 
     private fun readJsonLines(file: File) = if (!file.isFile) {
         emptyList()
@@ -219,8 +267,12 @@ class BackupManager(
         file.useLines { lines -> lines.filter { it.isNotBlank() }.map(::JSONObject).toList() }
     }
 
-    private fun unzipSafely(zipFile: File, destination: File) {
-        ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zip ->
+    private fun unzipSafely(zipFile: File, destination: File, onFraction: (Float) -> Unit) {
+        val total = zipFile.length()
+        val counted = ProgressInputStream(FileInputStream(zipFile), total) { read, size ->
+            onFraction((read.toFloat() / size).coerceIn(0f, 1f))
+        }
+        ZipInputStream(BufferedInputStream(counted, BUFFER)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 val output = File(destination, entry.name).canonicalFile
@@ -229,7 +281,7 @@ class BackupManager(
                     output.mkdirs()
                 } else {
                     output.parentFile?.mkdirs()
-                    FileOutputStream(output).use { zip.copyTo(it) }
+                    FileOutputStream(output).use { zip.copyTo(it, BUFFER) }
                 }
                 zip.closeEntry()
             }
@@ -238,6 +290,8 @@ class BackupManager(
 
     companion object {
         private val MAGIC = "NODEMAP".toByteArray(Charsets.US_ASCII)
+        private const val BUFFER = 256 * 1024
+        private const val RESTORE_CHUNK = 2000
     }
 }
 

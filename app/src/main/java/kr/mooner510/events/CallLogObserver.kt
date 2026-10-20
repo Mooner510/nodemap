@@ -16,6 +16,8 @@ import kr.mooner510.data.TimelineEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class CallLogObserver(
     private val context: Context,
@@ -27,6 +29,11 @@ class CallLogObserver(
     }
     private val linker = RecordingLinker(context)
 
+    private companion object {
+        // Observer callbacks can fire in bursts; serialize so the same call row is never inserted twice.
+        val syncMutex = Mutex()
+    }
+
     fun start() {
         if (!hasPermission()) return
         context.contentResolver.registerContentObserver(CallLog.Calls.CONTENT_URI, true, observer)
@@ -35,7 +42,9 @@ class CallLogObserver(
 
     fun stop() { runCatching { context.contentResolver.unregisterContentObserver(observer) } }
 
-    suspend fun sync() {
+    suspend fun sync() = syncMutex.withLock { syncLocked() }
+
+    private suspend fun syncLocked() {
         if (!hasPermission()) return
         val state = repository.state("last_call_id") ?: run { initializeBaselineIfNeeded(); return }
         val last = state.toLongOrNull() ?: 0

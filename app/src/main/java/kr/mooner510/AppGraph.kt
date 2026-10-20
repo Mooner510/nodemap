@@ -16,7 +16,7 @@ import kr.mooner510.routine.RoutineShortcutManager
 
 class AppGraph(context: Context) {
     private val appContext = context.applicationContext
-    val crypto = CryptoManager()
+    val crypto = CryptoManager(java.io.File(appContext.filesDir, "nodemap-datakey.bin"))
     val db = NodeMapDb(appContext)
     val attachmentStore = AttachmentStore(appContext, crypto)
     val repository = NodeMapRepository(db, crypto, attachmentStore)
