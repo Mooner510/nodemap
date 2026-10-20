@@ -11,3 +11,4 @@ keystore.properties
 *.aab
 *.nodemap
 /private/
+.claude-account

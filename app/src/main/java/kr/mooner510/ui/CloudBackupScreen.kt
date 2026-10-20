@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -35,8 +36,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kr.mooner510.appGraph
+import kr.mooner510.backup.BackupProgress
 import kr.mooner510.backup.RemoteBackupMetadata
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
@@ -54,12 +58,14 @@ fun CloudBackupScreen() {
     var confirmReplace by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var progress by remember { mutableStateOf<BackupProgress?>(null) }
+    var startedAt by remember { mutableLongStateOf(0L) }
     var confirmDelete by remember { mutableStateOf(false) }
 
     fun refresh() {
         if (busy || !graph.cloudBackupManager.configured) return
+        busy = true
         scope.launch {
-            busy = true
             runCatching { graph.cloudBackupManager.metadata(context) }
                 .onSuccess {
                     remote = it
@@ -73,8 +79,8 @@ fun CloudBackupScreen() {
 
     fun prepareBackup() {
         if (busy || !graph.cloudBackupManager.configured) return
+        busy = true
         scope.launch {
-            busy = true
             runCatching { graph.cloudBackupManager.metadata(context) }
                 .onSuccess {
                     remote = it
@@ -89,8 +95,8 @@ fun CloudBackupScreen() {
 
     fun prepareRestore() {
         if (busy || !graph.cloudBackupManager.configured) return
+        busy = true
         scope.launch {
-            busy = true
             runCatching { graph.cloudBackupManager.metadata(context) }
                 .onSuccess {
                     remote = it
@@ -121,11 +127,12 @@ fun CloudBackupScreen() {
             }
 
             when {
+                busy && progress != null -> progress?.let { BackupProgressPanel(it, startedAt) }
                 busy -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.padding(end = 10.dp))
                     Text("처리 중…")
                 }
-                loaded && remote != null -> BackupInfo(remote!!)
+                loaded && remote != null -> remote?.let { BackupInfo(it) }
                 loaded -> Text("보관 중인 백업 없음", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> Text("Google 계정으로 확인하면 현재 백업 상태를 볼 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -189,8 +196,7 @@ fun CloudBackupScreen() {
         }
     }
 
-    if (action != null) {
-        val currentAction = action!!
+    action?.let { currentAction ->
         AlertDialog(
             onDismissRequest = { action = null; expectedCurrentId = null; password = "" },
             title = { Text(if (currentAction == CloudBackupAction.BACKUP) "온라인 백업" else "온라인 백업 복원") },
@@ -208,13 +214,22 @@ fun CloudBackupScreen() {
                 Button(
                     enabled = password.length >= 8,
                     onClick = {
+                        if (busy) return@Button
                         val chars = password.toCharArray()
                         password = ""
                         action = null
+                        busy = true
+                        message = null
+                        startedAt = System.currentTimeMillis()
+                        progress = BackupProgress("준비 중", 0f)
                         scope.launch {
-                            busy = true
+                            // Leaving the screen must not abort an upload/restore half-way.
                             if (currentAction == CloudBackupAction.BACKUP) {
-                                runCatching { graph.cloudBackupManager.backup(context, chars, expectedCurrentId) }
+                                runCatching {
+                                    withContext(NonCancellable) {
+                                        graph.cloudBackupManager.backup(context, chars, expectedCurrentId) { progress = it }
+                                    }
+                                }
                                     .onSuccess {
                                         remote = it
                                         loaded = true
@@ -222,15 +237,21 @@ fun CloudBackupScreen() {
                                     }
                                     .onFailure { message = it.userMessage("온라인 백업에 실패했습니다.") }
                             } else {
-                                runCatching { graph.cloudBackupManager.restore(context, chars) }
+                                runCatching {
+                                    withContext(NonCancellable) {
+                                        graph.cloudBackupManager.restore(context, chars) { progress = it }
+                                            .also { graph.routineShortcutManager.refresh() }
+                                    }
+                                }
                                     .onSuccess {
                                         remote = it
                                         loaded = true
-                                        graph.routineShortcutManager.refresh()
                                         message = "온라인 백업을 복원했습니다. 시스템 권한은 다시 확인하세요."
                                     }
                                     .onFailure { message = it.userMessage("복원에 실패했습니다. 비밀번호와 네트워크를 확인하세요.") }
                             }
+                            chars.fill('\u0000')
+                            progress = null
                             expectedCurrentId = null
                             busy = false
                         }
@@ -266,9 +287,10 @@ fun CloudBackupScreen() {
             confirmButton = {
                 Button(onClick = {
                     confirmDelete = false
+                    if (busy) return@Button
+                    busy = true
                     scope.launch {
-                        busy = true
-                        runCatching { graph.cloudBackupManager.delete(context) }
+                        runCatching { withContext(NonCancellable) { graph.cloudBackupManager.delete(context) } }
                             .onSuccess {
                                 remote = null
                                 loaded = true

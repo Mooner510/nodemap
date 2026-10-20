@@ -1,0 +1,274 @@
+import { useEffect, useRef, useState } from 'react'
+import { HOUR, MINUTE } from '../lib/time'
+import type { Pin } from '../lib/types'
+
+interface Props {
+  time: number
+  pins: Pin[]
+  tickMinutes: number
+  radiusMinutes: number
+  rangeStart: number
+  rangeEnd: number
+  onStart: () => void
+  onPreview: (t: number) => void
+  onCommit: (t: number) => void
+}
+
+const HEIGHT = 92
+const PRECISION_HOLD_MS = 700
+const PRECISION_SCALE = 0.25
+
+const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+
+export function Scrubber({ time, pins, tickMinutes, radiusMinutes, rangeStart, rangeEnd, onStart, onPreview, onCommit }: Props) {
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const live = useRef(time)
+  const dragging = useRef(false)
+  const [precise, setPrecise] = useState(false)
+  const latest = useRef({ pins, tickMinutes, radiusMinutes, rangeStart, rangeEnd, precise, onStart, onPreview, onCommit })
+  latest.current = { pins, tickMinutes, radiusMinutes, rangeStart, rangeEnd, precise, onStart, onPreview, onCommit }
+  const raf = useRef(0)
+
+  if (!dragging.current) live.current = time
+
+  const draw = () => {
+    const c = canvas.current
+    if (!c) return
+    const { pins, tickMinutes, radiusMinutes, rangeStart, rangeEnd, precise } = latest.current
+    const dpr = window.devicePixelRatio || 1
+    const w = c.clientWidth
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(HEIGHT * dpr)) {
+      c.width = Math.round(w * dpr)
+      c.height = Math.round(HEIGHT * dpr)
+    }
+    const g = c.getContext('2d')!
+    g.setTransform(dpr, 0, 0, dpr, 0, 0)
+    g.clearRect(0, 0, w, HEIGHT)
+
+    const spanMs = radiusMinutes * 2 * MINUTE
+    const pxPerMs = (w / spanMs) * (precise ? 1 / PRECISION_SCALE : 1)
+    const t0 = live.current
+    const xOf = (t: number) => w / 2 + (t - t0) * pxPerMs
+    const left = t0 - w / 2 / pxPerMs
+    const right = t0 + w / 2 / pxPerMs
+    const baseY = 62
+
+    // Areas with no recording (before the first day / after "now") are dimmed.
+    g.fillStyle = css('--surface-2')
+    g.fillRect(0, baseY - 24, w, 36)
+    g.fillStyle = css('--fg-3')
+    g.globalAlpha = 0.18
+    const dimL = xOf(rangeStart)
+    const dimR = xOf(rangeEnd)
+    if (dimL > 0) g.fillRect(0, baseY - 24, Math.min(w, dimL), 36)
+    if (dimR < w) g.fillRect(Math.max(0, dimR), baseY - 24, w - Math.max(0, dimR), 36)
+    g.globalAlpha = 1
+
+    const tickMs = Math.max(1, tickMinutes) * MINUTE
+    const tickPx = tickMs * pxPerMs
+    const stride = tickPx < 5 ? Math.ceil(5 / tickPx) : 1
+    g.textAlign = 'center'
+    g.font = '600 11px system-ui, sans-serif'
+    for (let t = Math.floor(left / tickMs) * tickMs; t <= right; t += tickMs * stride) {
+      const x = xOf(t)
+      const isHour = t % HOUR === 0 || (new Date(t).getMinutes() === 0)
+      const isHalf = new Date(t).getMinutes() === 30
+      g.strokeStyle = css('--fg-3')
+      g.globalAlpha = isHour ? 0.9 : isHalf ? 0.55 : 0.32
+      g.lineWidth = 1.5
+      g.beginPath()
+      g.moveTo(x, baseY + 12)
+      g.lineTo(x, baseY + 12 - (isHour ? 16 : isHalf ? 11 : 7))
+      g.stroke()
+      g.globalAlpha = 1
+      if (isHour) {
+        g.fillStyle = css('--fg-2')
+        g.fillText(String(new Date(t).getHours()).padStart(2, '0'), x, baseY + 28 > HEIGHT ? HEIGHT - 2 : HEIGHT - 6)
+      }
+    }
+
+    // Pins sit above the ruler; overlapping ones stack as a count bubble.
+    const visible = pins.filter((p) => p.t >= left - 20 * MINUTE && p.t <= right + 20 * MINUTE)
+    const clusters: { x: number; items: Pin[] }[] = []
+    for (const p of visible) {
+      const x = xOf(p.t)
+      const last = clusters[clusters.length - 1]
+      if (last && x - last.x < 14) last.items.push(p)
+      else clusters.push({ x, items: [p] })
+    }
+    for (const cl of clusters) {
+      const y = baseY - 34
+      g.beginPath()
+      g.arc(cl.x, y, 9, 0, Math.PI * 2)
+      g.fillStyle = cl.items[0].color
+      g.fill()
+      g.lineWidth = 2.5
+      g.strokeStyle = css('--surface')
+      g.stroke()
+      if (cl.items.length > 1) {
+        g.fillStyle = '#fff'
+        g.font = '700 10px system-ui, sans-serif'
+        g.fillText(String(cl.items.length), cl.x, y + 3.5)
+      }
+      g.strokeStyle = cl.items[0].color
+      g.globalAlpha = 0.5
+      g.lineWidth = 1.5
+      g.beginPath()
+      g.moveTo(cl.x, y + 9)
+      g.lineTo(cl.x, baseY - 24)
+      g.stroke()
+      g.globalAlpha = 1
+    }
+
+    // Playhead
+    const acc = css('--accent')
+    g.strokeStyle = acc
+    g.lineWidth = 3
+    g.lineCap = 'round'
+    g.beginPath()
+    g.moveTo(w / 2, baseY - 28)
+    g.lineTo(w / 2, baseY + 14)
+    g.stroke()
+    g.fillStyle = acc
+    g.beginPath()
+    g.moveTo(w / 2 - 6, 8)
+    g.lineTo(w / 2 + 6, 8)
+    g.lineTo(w / 2, 17)
+    g.fill()
+  }
+
+  const schedule = () => {
+    cancelAnimationFrame(raf.current)
+    raf.current = requestAnimationFrame(draw)
+  }
+
+  useEffect(schedule)
+  useEffect(() => {
+    const ro = new ResizeObserver(schedule)
+    ro.observe(canvas.current!)
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    mq.addEventListener('change', schedule)
+    return () => { ro.disconnect(); mq.removeEventListener('change', schedule); cancelAnimationFrame(raf.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const gesture = useRef<{ x: number; startX: number; startT: number; moved: boolean; vel: number; lastMove: number; hold?: number; inertia?: number } | null>(null)
+
+  const clamp = (t: number) => Math.min(latest.current.rangeEnd, Math.max(latest.current.rangeStart, t))
+  const pxPerMs = () => {
+    const w = canvas.current!.clientWidth
+    return (w / (latest.current.radiusMinutes * 2 * MINUTE)) * (latest.current.precise ? 1 / PRECISION_SCALE : 1)
+  }
+
+  const finish = () => {
+    const gs = gesture.current
+    window.clearTimeout(gs?.hold)
+    setPrecise(false)
+    dragging.current = false
+    gesture.current = null
+    latest.current.onCommit(live.current)
+  }
+
+  const onDown = (e: React.PointerEvent) => {
+    const c = canvas.current!
+    c.setPointerCapture(e.pointerId)
+    const prev = gesture.current
+    if (prev?.inertia) cancelAnimationFrame(prev.inertia)
+    const gs = { x: e.clientX, startX: e.clientX, startT: live.current, moved: false, vel: 0, lastMove: performance.now() } as NonNullable<typeof gesture.current>
+    gesture.current = gs
+    dragging.current = true
+    latest.current.onStart()
+    const arm = () => {
+      gs.hold = window.setTimeout(() => setPrecise(true), PRECISION_HOLD_MS)
+    }
+    arm()
+    ;(gs as { rearm?: () => void }).rearm = () => { window.clearTimeout(gs.hold); arm() }
+  }
+
+  const onMove = (e: React.PointerEvent) => {
+    const gs = gesture.current
+    if (!gs) return
+    const dx = e.clientX - gs.x
+    if (Math.abs(e.clientX - gs.startX) > 5) gs.moved = true
+    if (dx === 0) return
+    const now = performance.now()
+    const dt = Math.max(1, now - gs.lastMove)
+    gs.lastMove = now
+    const dTime = -dx / pxPerMs()
+    gs.vel = dTime / dt
+    gs.x = e.clientX
+    live.current = clamp(live.current + dTime)
+    if (!latest.current.precise) (gs as { rearm?: () => void }).rearm?.()
+    latest.current.onPreview(live.current)
+    schedule()
+  }
+
+  const onUp = (e: React.PointerEvent) => {
+    const gs = gesture.current
+    if (!gs) return
+    window.clearTimeout(gs.hold)
+    // A tap on a pin dot jumps straight to it.
+    if (!gs.moved) {
+      const rect = canvas.current!.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const ppm = pxPerMs()
+      const hit = latest.current.pins
+        .map((p) => ({ p, d: Math.abs(rect.width / 2 + (p.t - live.current) * ppm - x) }))
+        .filter((h) => h.d < 16)
+        .sort((a, b) => a.d - b.d)[0]
+      if (hit) live.current = clamp(hit.p.t)
+      finish()
+      return
+    }
+    // Fling with inertia.
+    let vel = Math.abs(performance.now() - gs.lastMove) < 60 ? gs.vel : 0
+    if (latest.current.precise || Math.abs(vel) < 0.02 * (latest.current.radiusMinutes * MINUTE / 1000)) {
+      finish()
+      return
+    }
+    let last = performance.now()
+    const step = (now: number) => {
+      const dt = now - last
+      last = now
+      live.current = clamp(live.current + vel * dt)
+      vel *= Math.pow(0.0035, dt / 1000)
+      latest.current.onPreview(live.current)
+      draw()
+      if (Math.abs(vel) > 0.004 * (latest.current.radiusMinutes * MINUTE / 1000) && live.current > latest.current.rangeStart && live.current < latest.current.rangeEnd) {
+        gs.inertia = requestAnimationFrame(step)
+      } else finish()
+    }
+    gs.inertia = requestAnimationFrame(step)
+  }
+
+  return (
+    <div className="relative">
+      <canvas
+        ref={canvas}
+        role="slider"
+        aria-label="시간 이동"
+        aria-valuemin={latest.current.rangeStart}
+        aria-valuemax={latest.current.rangeEnd}
+        aria-valuenow={time}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          const step = e.shiftKey ? 30 * MINUTE : 5 * MINUTE
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            const t = clamp(live.current + (e.key === 'ArrowLeft' ? -step : step))
+            live.current = t
+            onCommit(t)
+          }
+        }}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={finish}
+        className="block w-full touch-none"
+        style={{ height: HEIGHT }}
+      />
+      {precise && (
+        <span className="anim-pop pointer-events-none absolute top-1 right-2 rounded-full bg-accent px-2.5 py-1 text-[11px] font-bold text-accentfg">정밀 이동</span>
+      )}
+    </div>
+  )
+}

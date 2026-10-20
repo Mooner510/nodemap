@@ -76,8 +76,9 @@ private val NodeTypography = Typography(
     labelMedium = TextStyle(fontSize = 11.sp, lineHeight = 15.sp, fontWeight = FontWeight.Medium),
 )
 
+/** [fullBleed] skips the system-bar padding for content that draws edge to edge and handles insets itself. */
 @Composable
-fun NodeMapTheme(content: @Composable () -> Unit) {
+fun NodeMapTheme(fullBleed: Boolean = false, content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
         shapes = NodeShapes,
@@ -88,9 +89,7 @@ fun NodeMapTheme(content: @Composable () -> Unit) {
             color = MaterialTheme.colorScheme.background,
         ) {
             Box(
-                Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing),
+                if (fullBleed) Modifier.fillMaxSize() else Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
             ) {
                 content()
             }
@@ -144,3 +143,7 @@ internal fun SectionHeading(title: String, description: String? = null) {
         )
     }
 }
+
+internal fun parsePinColor(hex: String): Color = runCatching {
+    Color(android.graphics.Color.parseColor(hex))
+}.getOrDefault(Color(0xFF3182F6))

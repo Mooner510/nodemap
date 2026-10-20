@@ -21,6 +21,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -34,6 +36,12 @@ class MessageObserver(
     }
     private val mmsObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean, uri: Uri?) { scope.launch { syncMms(false) } }
+    }
+
+    private companion object {
+        // Shared with SmsReceiver/MmsReceiver instances so provider rows are never imported twice.
+        val smsMutex = Mutex()
+        val mmsMutex = Mutex()
     }
 
     fun start() {
@@ -51,7 +59,9 @@ class MessageObserver(
         runCatching { context.contentResolver.unregisterContentObserver(mmsObserver) }
     }
 
-    suspend fun syncSms(triggeredByBroadcast: Boolean) {
+    suspend fun syncSms(triggeredByBroadcast: Boolean) = smsMutex.withLock { syncSmsLocked(triggeredByBroadcast) }
+
+    private suspend fun syncSmsLocked(triggeredByBroadcast: Boolean) {
         if (!hasReadSms()) return
         if (repository.state("last_sms_id") == null) {
             val max = maxId(Telephony.Sms.CONTENT_URI)
@@ -120,7 +130,9 @@ class MessageObserver(
         if (newest > last) repository.setState("last_sms_id", newest.toString())
     }
 
-    suspend fun syncMms(triggeredByBroadcast: Boolean) {
+    suspend fun syncMms(triggeredByBroadcast: Boolean) = mmsMutex.withLock { syncMmsLocked(triggeredByBroadcast) }
+
+    private suspend fun syncMmsLocked(triggeredByBroadcast: Boolean) {
         if (!hasReadSms()) return
         if (repository.state("last_mms_id") == null) {
             val max = maxId(Telephony.Mms.CONTENT_URI)

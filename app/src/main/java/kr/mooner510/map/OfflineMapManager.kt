@@ -97,14 +97,25 @@ class OfflineMapManager(
         maxZoom: Double = 16.0,
     ) {
         val style = preferences.current().mapStyleUri
-        val definition = OfflineTilePyramidRegionDefinition(
-            style,
-            LatLngBounds.from(north, east, south, west),
-            minZoom,
-            maxZoom,
-            context.resources.displayMetrics.density.coerceIn(1f, 3f),
-            true,
-        )
+        val definition = runCatching {
+            OfflineTilePyramidRegionDefinition(
+                style,
+                // Padding can push the box past the poles / antimeridian, which LatLngBounds rejects.
+                LatLngBounds.from(
+                    north.coerceIn(-MAX_LATITUDE, MAX_LATITUDE),
+                    east.coerceIn(-180.0, 180.0),
+                    south.coerceIn(-MAX_LATITUDE, MAX_LATITUDE),
+                    west.coerceIn(-180.0, 180.0),
+                ),
+                minZoom,
+                maxZoom,
+                context.resources.displayMetrics.density.coerceIn(1f, 3f),
+                true,
+            )
+        }.getOrElse {
+            _downloadState.value = OfflineDownloadState.Failed(it.message ?: "잘못된 지도 범위입니다.")
+            return
+        }
         val metadata = JSONObject().apply {
             put("id", UUID.randomUUID().toString())
             put("name", name)
@@ -116,9 +127,16 @@ class OfflineMapManager(
             metadata,
             object : OfflineManager.CreateOfflineRegionCallback {
                 override fun onCreate(region: OfflineRegion) {
+                    // Stop the download and drop the observer once finished so the native region
+                    // doesn't stay active (and keep this callback alive) for the life of the process.
+                    fun finish() {
+                        region.setDownloadState(OfflineRegion.STATE_INACTIVE)
+                        region.setObserver(null)
+                    }
                     region.setObserver(object : OfflineRegion.OfflineRegionObserver {
                         override fun onStatusChanged(status: OfflineRegionStatus) {
                             _downloadState.value = if (status.isComplete) {
+                                finish()
                                 OfflineDownloadState.Complete(name, status.completedResourceSize)
                             } else {
                                 OfflineDownloadState.Downloading(
@@ -137,6 +155,7 @@ class OfflineMapManager(
                         }
 
                         override fun mapboxTileCountLimitExceeded(limit: Long) {
+                            finish()
                             _downloadState.value = OfflineDownloadState.Failed(
                                 "오프라인 타일 제한 초과: $limit",
                             )
@@ -204,6 +223,10 @@ class OfflineMapManager(
             override fun onRegionNotFound() = onDone(false)
             override fun onError(error: String) = onDone(false)
         })
+    }
+
+    private companion object {
+        const val MAX_LATITUDE = 85.05112878
     }
 
     private fun metadataName(metadata: ByteArray): String = runCatching {

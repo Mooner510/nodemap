@@ -64,6 +64,7 @@ import kr.mooner510.data.RuleConditionJoin
 import kr.mooner510.data.RuleConditionOperator
 import kr.mooner510.data.SYSTEM_TYPE_GENERAL
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -91,7 +92,8 @@ fun PinRulesScreen() {
     }
 
     LaunchedEffect(Unit) { reload() }
-    LaunchedEffect(Unit) { graph.repository.changes.collect { reload() } }
+    // reload() issues one query per rule/type and changes fires on every track point: conflate bursts.
+    LaunchedEffect(Unit) { graph.repository.changes.conflate().collect { reload() } }
 
     suspend fun refreshRoutineShortcutsIfNeeded(rule: PinRule?) {
         if (rule?.source == PinRuleSource.ROUTINE) graph.routineShortcutManager.refresh()
@@ -392,7 +394,8 @@ private fun PinRuleDialog(
 ) {
     var name by remember(initial) { mutableStateOf(initial?.name ?: "") }
     var source by remember(initial) { mutableStateOf(initial?.source ?: PinRuleSource.NOTIFICATION) }
-    var typeId by remember(initial, types) { mutableStateOf(initial?.pinTypeId ?: types.firstOrNull()?.id ?: SYSTEM_TYPE_GENERAL) }
+    // Keyed only on `initial`: `types` is reloaded on every DB change, which would reset the user's choice.
+    var typeId by remember(initial) { mutableStateOf(initial?.pinTypeId ?: types.firstOrNull()?.id ?: SYSTEM_TYPE_GENERAL) }
     var titleOverride by remember(initial) { mutableStateOf(initial?.titleOverride ?: "") }
     var bodyTemplate by remember(initial) { mutableStateOf(initial?.bodyTemplate ?: "") }
     var appMode by remember(initial) { mutableStateOf(initial?.appSelectionMode ?: AppSelectionMode.INCLUDE_SELECTED) }
@@ -401,7 +404,7 @@ private fun PinRuleDialog(
     var conditions by remember(initial) { mutableStateOf(initial?.conditions ?: emptyList()) }
     var appPickerOpen by remember { mutableStateOf(false) }
     val sourceLocked = initial?.system == true || usageCount > 0
-    val validConditions = conditions.all { it.value.isNotBlank() && conditionValueValid(it) }
+    val validConditions = remember(conditions) { conditions.all { it.value.isNotBlank() && conditionValueValid(it) } }
     val appsValid = source != PinRuleSource.NOTIFICATION ||
         appMode == AppSelectionMode.EXCLUDE_SELECTED || packages.isNotEmpty()
 
@@ -708,11 +711,14 @@ private fun RuleAppPicker(
                     leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 )
+                val visibleApps = remember(apps, query) {
+                    apps.filter {
+                        query.isBlank() || it.label.contains(query, true) || it.packageName.contains(query, true)
+                    }
+                }
                 LazyColumn(Modifier.heightIn(max = 390.dp).padding(top = 7.dp)) {
                     items(
-                        apps.filter {
-                            query.isBlank() || it.label.contains(query, true) || it.packageName.contains(query, true)
-                        },
+                        visibleApps,
                         key = { it.packageName },
                     ) { app ->
                         Row(

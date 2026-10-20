@@ -8,6 +8,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import java.time.Instant
 import java.time.LocalDate
@@ -24,7 +26,9 @@ internal fun AvailableDayPickerDialog(
 ) {
     val days = remember(availableDays) { availableDays.distinct().toSet() }
     if (days.isEmpty()) {
-        onDismiss()
+        // Don't invoke callbacks (state writes) directly during composition.
+        val dismiss = rememberUpdatedState(onDismiss)
+        LaunchedEffect(Unit) { dismiss.value() }
         return
     }
 

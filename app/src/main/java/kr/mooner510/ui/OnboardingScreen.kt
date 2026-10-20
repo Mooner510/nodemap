@@ -42,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -64,7 +66,7 @@ fun OnboardingScreen() {
     val graph = context.appGraph
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
-    var page by remember { mutableIntStateOf(0) }
+    var page by rememberSaveable { mutableIntStateOf(0) }
     var refresh by remember { mutableIntStateOf(0) }
 
     val foregroundLauncher = rememberLauncherForActivityResult(
@@ -86,7 +88,7 @@ fun OnboardingScreen() {
     val backgroundGranted = hasPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION, refresh)
     val sensitiveGranted = hasPermission(context, Manifest.permission.READ_SMS, refresh) &&
         hasPermission(context, Manifest.permission.READ_CALL_LOG, refresh)
-    val notificationAccessGranted = notificationListenerEnabled(context, refresh)
+    val notificationAccessGranted = remember(refresh) { notificationListenerEnabled(context, refresh) }
     val canContinue = page != 1 || foregroundGranted
 
     Column(
@@ -227,10 +229,13 @@ fun OnboardingScreen() {
                         page += 1
                     } else {
                         scope.launch {
-                            graph.preferences.setOnboardingCompleted(true)
-                            if (foregroundGranted && graph.preferences.current().trackingEnabled) {
+                            // Read settings before completing onboarding: completing it removes this
+                            // screen from composition, which cancels `scope` before tracking could start.
+                            val trackingEnabled = graph.preferences.current().trackingEnabled
+                            if (foregroundGranted && trackingEnabled) {
                                 TrackingService.start(context)
                             }
+                            graph.preferences.setOnboardingCompleted(true)
                         }
                     }
                 },
@@ -493,7 +498,6 @@ private fun hasPermission(context: android.content.Context, permission: String, 
 
 private fun notificationListenerEnabled(context: android.content.Context, refresh: Int): Boolean {
     refresh.hashCode()
-    return Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-        .orEmpty()
-        .contains(context.packageName)
+    // Exact package match; a substring check would also match e.g. "kr.mooner510.other".
+    return NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
 }
