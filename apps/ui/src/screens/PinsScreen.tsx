@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import { bridge } from '../lib/bridge'
 import { useLiveData } from '../lib/hooks'
-import { DAY, dayKey, fmtClock, parseDayKey, relativeDay, startOfDay, fmtDay } from '../lib/time'
-import type { Pin, RuleSummary } from '../lib/types'
+import { DAY, dayKey, fmtClock, fmtClockSec, parseDayKey, relativeDay, startOfDay, fmtDay } from '../lib/time'
+import type { Pin } from '../lib/types'
 import { Icon } from '../ui/Icon'
-import { Button, Card, Divider, Empty, Row, Segmented, Spinner, Switch, cx } from '../ui/kit'
+import { Card, Divider, Empty, Segmented, Sheet, Spinner, cx } from '../ui/kit'
 import { PinBadge } from './parts'
+import { RulesEditor } from './RulesEditor'
 
 type Tab = 'log' | 'rules'
 type Period = 'today' | 'week' | 'month' | 'all'
@@ -24,7 +25,7 @@ export function PinsScreen() {
         <h1 className="mb-3 text-[28px] font-extrabold tracking-tight">압정</h1>
         <Segmented<Tab> value={tab} onChange={setTab} options={[{ value: 'log', label: '기록' }, { value: 'rules', label: '자동 규칙' }]} />
       </header>
-      <div className="scroll-y flex-1 pb-[calc(var(--tab-h)+var(--sab,0px)+32px)]">{tab === 'log' ? <PinLog /> : <Rules />}</div>
+      <div className="scroll-y flex-1 pb-[calc(var(--tab-h)+var(--sab,0px)+32px)]">{tab === 'log' ? <PinLog /> : <RulesEditor />}</div>
     </div>
   )
 }
@@ -33,6 +34,7 @@ function PinLog() {
   const [period, setPeriod] = useState<Period>('week')
   const [typeId, setTypeId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<Pin | null>(null)
   const { data, error } = useLiveData(async () => {
     const days = PERIODS.find((p) => p.value === period)!.days
     const end = startOfDay(Date.now()) + DAY
@@ -84,26 +86,58 @@ function PinLog() {
             {pins.map((p, i) => (
               <div key={p.id}>
                 {i > 0 && <Divider />}
-                <div className="flex items-start gap-3.5 px-4 py-3.5">
+                <button onClick={() => setSelected(p)} className="flex w-full items-start gap-3.5 px-4 py-3.5 text-left transition-colors active:bg-surface2">
                   <PinBadge pin={p} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-[16px] font-bold">{p.title}</span>
+                      <span className="min-w-0 truncate text-[16px] font-bold">{oneLine(p.title)}</span>
                       <span className="num shrink-0 text-[13px] text-fg3">{fmtClock(p.t)}</span>
                     </div>
-                    {p.body && <p className="mt-0.5 line-clamp-3 text-[14px] leading-snug text-fg2">{p.body}</p>}
-                    <div className="mt-1.5 flex items-center gap-2 text-[12px] font-semibold">
-                      <span style={{ color: p.color }}>{p.typeName}</span>
-                      {p.lat === null && <span className="flex items-center gap-1 text-fg3"><Icon name="wifiOff" size={12} />위치 없음</span>}
+                    {p.body && <p className="mt-0.5 line-clamp-3 text-[14px] leading-snug break-keep text-fg2 [overflow-wrap:anywhere]">{oneLine(p.body)}</p>}
+                    <div className="mt-1.5 flex min-w-0 items-center gap-2 text-[12px] font-semibold">
+                      <span className="truncate" style={{ color: p.color }}>{p.typeName}</span>
+                      {p.lat === null && <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-fg3"><Icon name="wifiOff" size={12} />위치 없음</span>}
                     </div>
                   </div>
-                </div>
+                </button>
               </div>
             ))}
           </Card>
         </section>
       ))}
+      <PinDetailSheet pin={selected} onClose={() => setSelected(null)} />
     </div>
+  )
+}
+
+/** Collapses line breaks and runs of whitespace so list rows clamp cleanly. */
+function oneLine(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function PinDetailSheet({ pin, onClose }: { pin: Pin | null; onClose: () => void }) {
+  return (
+    <Sheet open={!!pin} onClose={onClose}>
+      {pin && (
+        <div className="space-y-5 px-6 pt-1 pb-8">
+          <div className="flex items-center gap-3">
+            <PinBadge pin={pin} size={48} />
+            <div className="min-w-0">
+              <span className="inline-block max-w-full truncate rounded-full px-2.5 py-0.5 text-[12px] font-semibold" style={{ background: `${pin.color}22`, color: pin.color }}>{pin.typeName}</span>
+              <p className="num mt-1 text-[14px] text-fg3">{fmtDay(pin.t)} · {fmtClockSec(pin.t)}</p>
+            </div>
+          </div>
+          <h3 className="text-[20px] leading-snug font-bold break-keep whitespace-pre-wrap select-text [overflow-wrap:anywhere]">{pin.title}</h3>
+          {pin.body && (
+            <p className="rounded-2xl bg-surface2 p-4 text-[15px] leading-relaxed break-keep whitespace-pre-wrap text-fg2 select-text [overflow-wrap:anywhere]">{pin.body.trim()}</p>
+          )}
+          <div className="flex items-center gap-2 text-[14px] text-fg3">
+            <Icon name={pin.lat === null ? 'wifiOff' : 'pin'} size={16} />
+            {pin.lat === null || pin.lng === null ? '위치 없음' : <span className="num">{pin.lat.toFixed(5)}, {pin.lng.toFixed(5)}</span>}
+          </div>
+        </div>
+      )}
+    </Sheet>
   )
 }
 
@@ -111,46 +145,10 @@ function Chip({ active, color, onClick, children }: { active: boolean; color?: s
   return (
     <button
       onClick={onClick}
-      className={cx('tap shrink-0 rounded-full px-4 py-2 text-[14px] font-semibold', active ? 'text-white' : 'bg-surface text-fg2')}
+      className={cx('tap shrink-0 whitespace-nowrap rounded-full px-4 py-2 text-[14px] font-semibold', active ? 'text-white' : 'bg-surface text-fg2')}
       style={active ? { background: color ?? 'var(--accent)' } : undefined}
     >
       {children}
     </button>
-  )
-}
-
-const SOURCE_LABEL: Record<RuleSummary['source'], string> = { PHONE_CALL: '전화', SMS: '문자', MMS: '멀티미디어 문자', NOTIFICATION: '앱 알림', ROUTINE: '루틴' }
-
-function Rules() {
-  const { data, error, reload } = useLiveData(() => bridge.getRules(), [], 300)
-  const [local, setLocal] = useState<Record<string, boolean>>({})
-  const toggle = (r: RuleSummary, enabled: boolean) => {
-    setLocal((l) => ({ ...l, [r.id]: enabled }))
-    bridge.setRuleEnabled({ id: r.id, enabled }).then(reload).catch(reload)
-  }
-  if (!data && !error) return <div className="grid place-items-center py-20"><Spinner size={30} /></div>
-  if (error) return <Empty icon="x" title="불러오지 못했어요" desc={error} />
-  const rules = data ?? []
-  return (
-    <div className="px-4">
-      <p className="px-1 pb-3 text-[14px] leading-relaxed text-fg3">전화·문자·알림이 들어오면 규칙에 맞는 것만 그 순간의 위치에 압정으로 남겨요.</p>
-      <Card>
-        {rules.map((r, i) => (
-          <div key={r.id}>
-            {i > 0 && <Divider />}
-            <Row
-              icon={r.source === 'PHONE_CALL' ? 'phone' : r.source === 'SMS' || r.source === 'MMS' ? 'message' : r.source === 'ROUTINE' ? 'repeat' : 'bell'}
-              tint={r.color}
-              title={r.name}
-              desc={[SOURCE_LABEL[r.source], r.conditionCount ? `조건 ${r.conditionCount}개` : null, r.packageCount ? `앱 ${r.packageCount}개` : null, r.hidden ? '숨김' : null].filter(Boolean).join(' · ')}
-              trailing={<Switch label={`${r.name} 사용`} checked={local[r.id] ?? r.enabled} onChange={(v) => toggle(r, v)} />}
-            />
-          </div>
-        ))}
-      </Card>
-      <Button variant="soft" className="mt-4 flex w-full items-center justify-center gap-2" onClick={() => bridge.openNative('rules')}>
-        <Icon name="edit" size={18} />규칙 만들기 · 편집
-      </Button>
-    </div>
   )
 }

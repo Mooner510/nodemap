@@ -25,6 +25,7 @@ class NodeMapDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_
         createPinConfigurationTables(db)
         db.execSQL("CREATE TABLE geocode_cache (cache_key TEXT PRIMARY KEY,updated_at INTEGER NOT NULL,payload BLOB NOT NULL)")
         db.execSQL("CREATE TABLE state (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        createTimeIndexes(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -38,6 +39,13 @@ class NodeMapDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_
             runCatching { db.execSQL("CREATE INDEX idx_events_rule_time ON events(pin_rule_id,timestamp)") }
             createPinConfigurationTables(db)
         }
+        if (oldVersion < 3) createTimeIndexes(db)
+    }
+
+    // Timeline reads filter/sort on timestamp alone; the (day_key,timestamp) indexes can't serve that.
+    private fun createTimeIndexes(db: SQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_track_time ON track_points(timestamp)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp)")
     }
 
     private fun createPinConfigurationTables(db: SQLiteDatabase) {
@@ -53,6 +61,6 @@ class NodeMapDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_
 
     companion object {
         const val DB_NAME = "nodemap.db"
-        const val DB_VERSION = 2
+        const val DB_VERSION = 3
     }
 }

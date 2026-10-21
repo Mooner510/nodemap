@@ -2,31 +2,56 @@ package kr.mooner510.web
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.webkit.JavascriptInterface
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kr.mooner510.BiometricLock
 import kr.mooner510.appGraph
+import kr.mooner510.backup.BackupProgress
+import kr.mooner510.backup.RemoteBackupMetadata
+import kr.mooner510.data.AppSelectionMode
 import kr.mooner510.data.AppSettings
 import kr.mooner510.data.EventType
+import kr.mooner510.data.PinIcon
+import kr.mooner510.data.PinRule
+import kr.mooner510.data.PinRuleSource
+import kr.mooner510.data.PinType
 import kr.mooner510.data.ResolvedPin
+import kr.mooner510.data.RuleCondition
+import kr.mooner510.data.RuleConditionField
+import kr.mooner510.data.RuleConditionJoin
+import kr.mooner510.data.RuleConditionOperator
 import kr.mooner510.data.SYSTEM_TYPE_GENERAL
 import kr.mooner510.data.TimelineEvent
 import kr.mooner510.data.TrackPoint
 import kr.mooner510.data.TrackingPreset
+import kr.mooner510.map.OfflineDownloadState
 import kr.mooner510.tracking.TrackingService
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.LocalDate
+import java.time.ZoneId
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
-/** The screens the web UI can hand off to while they are still written in Compose. */
-enum class NativeScreen(val key: String) {
-    Rules("rules"),
-    CloudBackup("cloudBackup"),
-    AdvancedSettings("advancedSettings"),
+/** What only the hosting activity can do: system permission dialogs, document pickers and settings screens. */
+interface WebUiHostActions {
+    suspend fun requestPermissions(permissions: Array<String>)
+    suspend fun createDocument(fileName: String): Uri?
+    suspend fun openDocument(): Uri?
+    fun startActivity(intent: Intent)
+    fun requestBiometricEnroll()
+    fun emit(name: String, json: String)
 }
 
 /**
@@ -38,10 +63,10 @@ class WebUiBridge(
     private val context: Context,
     private val scope: CoroutineScope,
     private val reply: (id: Int, ok: Boolean, json: String) -> Unit,
-    private val openNative: (NativeScreen) -> Unit,
-    private val requestBiometricEnroll: () -> Unit,
+    private val host: WebUiHostActions,
 ) {
     private val graph get() = context.appGraph
+    private val backupBusy = AtomicBoolean(false)
 
     @JavascriptInterface
     fun call(id: Int, method: String, argsJson: String) {
@@ -60,6 +85,7 @@ class WebUiBridge(
     private suspend fun dispatch(method: String, args: JSONObject): Any? = when (method) {
         "getSettings" -> graph.preferences.current().toJson()
         "updateSettings" -> updateSettings(args)
+        "completeOnboarding" -> completeOnboarding()
         "getTimeline" -> getTimeline(args.getLong("start"), args.getLong("end"))
         "getPins" -> JSONArray().also { arr ->
             graph.repository.resolvedPinsBetween(args.getLong("start"), args.getLong("end"))
@@ -71,18 +97,83 @@ class WebUiBridge(
             addManualPin(args.optString("text"), args.optString("typeId"))
             null
         }
-        "getRules" -> getRules()
+
+        "getRuleEditor" -> getRuleEditor()
+        "saveRule" -> {
+            saveRule(args)
+            null
+        }
+        "deleteRule" -> {
+            val rule = graph.repository.getPinRule(args.getString("id")) ?: error("규칙을 찾을 수 없습니다.")
+            check(graph.repository.deletePinRule(rule.id)) { "압정을 만든 규칙이나 시스템 규칙은 삭제할 수 없습니다." }
+            refreshRoutineShortcutsIfNeeded(rule)
+            null
+        }
         "setRuleEnabled" -> {
             val rule = graph.repository.getPinRule(args.getString("id")) ?: error("규칙을 찾을 수 없습니다.")
             graph.repository.upsertPinRule(rule.copy(enabled = args.getBoolean("enabled")))
+            refreshRoutineShortcutsIfNeeded(rule)
             null
         }
-        "openNative" -> {
-            val key = args.getString("screen")
-            val screen = NativeScreen.entries.firstOrNull { it.key == key } ?: error("알 수 없는 화면입니다.")
-            withContext(Dispatchers.Main) { openNative(screen) }
+        "setRuleHidden" -> {
+            val rule = graph.repository.getPinRule(args.getString("id")) ?: error("규칙을 찾을 수 없습니다.")
+            graph.repository.upsertPinRule(rule.copy(hidden = args.getBoolean("hidden")))
             null
         }
+        "moveRule" -> {
+            moveRule(args.getString("id"), args.getInt("delta"))
+            null
+        }
+        "savePinType" -> {
+            savePinType(args)
+            null
+        }
+        "deletePinType" -> {
+            check(graph.repository.deletePinType(args.getString("id"))) { "사용 중인 타입이나 기본 타입은 삭제할 수 없습니다." }
+            null
+        }
+        "getInstalledApps" -> getInstalledApps()
+
+        "getPermissions" -> permissionsJson()
+        "requestPermission" -> {
+            requestPermission(args.getString("kind"))
+            permissionsJson()
+        }
+
+        "getOfflineMaps" -> getOfflineMaps()
+        "downloadOfflineMap" -> {
+            downloadOfflineMap(LocalDate.parse(args.getString("start")), LocalDate.parse(args.getString("end")))
+            null
+        }
+        "resumeOfflineMap" -> {
+            graph.offlineMapManager.resume(args.getLong("id"))
+            null
+        }
+        "deleteOfflineMap" -> {
+            check(graph.offlineMapManager.delete(args.getLong("id"))) { "오프라인 지도를 삭제하지 못했습니다." }
+            null
+        }
+
+        "exportBackup" -> exclusiveBackup { exportBackup(args.getString("password")) }
+        "importBackup" -> exclusiveBackup { importBackup(args.getString("password")) }
+        "cloudBackupConfigured" -> graph.cloudBackupManager.configured
+        "cloudBackupMetadata" -> withContext(Dispatchers.Main) { graph.cloudBackupManager.metadata(context) }?.toJson() ?: JSONObject.NULL
+        "cloudBackup" -> exclusiveBackup {
+            val password = args.getString("password").toCharArray()
+            val expected = args.optString("expectedId").takeIf { it.isNotEmpty() }
+            graph.cloudBackupManager.backup(context, password, expected, ::emitProgress).toJson()
+        }
+        "cloudRestore" -> exclusiveBackup {
+            val password = args.getString("password").toCharArray()
+            graph.cloudBackupManager.restore(context, password, ::emitProgress)
+                .also { graph.routineShortcutManager.refresh() }
+                .toJson()
+        }
+        "cloudDelete" -> exclusiveBackup {
+            graph.cloudBackupManager.delete(context)
+            null
+        }
+
         else -> error("지원하지 않는 요청입니다: $method")
     }
 
@@ -90,6 +181,10 @@ class WebUiBridge(
         val prefs = graph.preferences
         if (patch.has("trackingEnabled")) {
             val enabled = patch.getBoolean("trackingEnabled")
+            if (enabled && !hasLocationPermission()) {
+                // Starting a location foreground service without permission crashes the app: ask first.
+                host.requestPermissions(LOCATION_PERMISSIONS)
+            }
             when {
                 !enabled -> {
                     prefs.setTrackingEnabled(false)
@@ -99,9 +194,6 @@ class WebUiBridge(
                     prefs.setTrackingEnabled(true)
                     TrackingService.start(context)
                 }
-                // Starting a location foreground service without permission crashes the app; the
-                // permission flow lives in the native settings screen.
-                else -> withContext(Dispatchers.Main) { openNative(NativeScreen.AdvancedSettings) }
             }
         }
         if (patch.has("trackingPreset")) {
@@ -113,7 +205,7 @@ class WebUiBridge(
         if (patch.has("biometricLockEnabled")) {
             val enabled = patch.getBoolean("biometricLockEnabled")
             if (enabled && !BiometricLock.isAvailable(context)) {
-                withContext(Dispatchers.Main) { requestBiometricEnroll() }
+                withContext(Dispatchers.Main) { host.requestBiometricEnroll() }
             } else {
                 prefs.setBiometricLockEnabled(enabled)
             }
@@ -137,6 +229,13 @@ class WebUiBridge(
         return prefs.current().toJson()
     }
 
+    private suspend fun completeOnboarding(): JSONObject {
+        val prefs = graph.preferences
+        if (hasLocationPermission() && prefs.current().trackingEnabled) TrackingService.start(context)
+        prefs.setOnboardingCompleted(true)
+        return prefs.current().toJson()
+    }
+
     private suspend fun getTimeline(start: Long, end: Long): JSONObject {
         val repo = graph.repository
         val points = repo.trackPointsBetween(start, end)
@@ -146,7 +245,8 @@ class WebUiBridge(
             put("pins", JSONArray().also { arr -> pins.forEach { arr.put(it.toJson()) } })
             put("pinTypes", JSONArray().also { arr -> repo.pinTypes().forEach { arr.put(it.toJson()) } })
             put("latest", repo.latestTrackPoint()?.toJsonRow() ?: JSONObject.NULL)
-            put("days", JSONArray().also { arr -> repo.dataDays().forEach { arr.put(it.toString()) } })
+            // The UI contract is ascending (oldest first); dataDays() is newest first.
+            put("days", JSONArray().also { arr -> repo.dataDays().asReversed().forEach { arr.put(it.toString()) } })
         }
     }
 
@@ -168,37 +268,270 @@ class WebUiBridge(
         )
     }
 
-    private suspend fun getRules(): JSONArray {
+    // ---- Pin rules / types ---------------------------------------------------
+
+    private suspend fun getRuleEditor(): JSONObject {
         val repo = graph.repository
-        val types = repo.pinTypes().associateBy { it.id }
-        return JSONArray().also { arr ->
-            repo.pinRules().sortedBy { it.priority }.forEach { rule ->
-                val type = types[rule.pinTypeId]
-                arr.put(
-                    JSONObject()
-                        .put("id", rule.id)
-                        .put("name", rule.name)
-                        .put("source", rule.source.name)
-                        .put("system", rule.system)
-                        .put("enabled", rule.enabled)
-                        .put("hidden", rule.hidden)
-                        .put("priority", rule.priority)
-                        .put("typeId", rule.pinTypeId)
-                        .put("typeName", type?.name ?: "일반")
-                        .put("color", type?.colorHex ?: "#3182F6")
-                        .put("conditionCount", rule.conditions.size)
-                        .put("packageCount", rule.packageNames.size),
-                )
-            }
+        val types = repo.pinTypes()
+        val rules = repo.pinRules().sortedWith(compareBy<PinRule> { it.source.ordinal }.thenBy { it.priority })
+        return JSONObject()
+            .put(
+                "types",
+                JSONArray().also { arr ->
+                    types.forEach { arr.put(it.toJson().put("system", it.id.startsWith("system:type:")).put("usage", repo.pinTypeUsageCount(it.id))) }
+                },
+            )
+            .put("rules", JSONArray().also { arr -> rules.forEach { arr.put(it.toJson(repo.pinRuleUsageCount(it.id))) } })
+    }
+
+    private suspend fun saveRule(json: JSONObject) {
+        val repo = graph.repository
+        val existing = json.optString("id").takeIf { it.isNotEmpty() }?.let { repo.getPinRule(it) ?: error("규칙을 찾을 수 없습니다.") }
+        val usage = existing?.let { repo.pinRuleUsageCount(it.id) } ?: 0L
+        val requestedSource = PinRuleSource.valueOf(json.getString("source"))
+        // The detection source of a system rule, or of one that already produced pins, is fixed.
+        val source = if (existing != null && (existing.system || usage > 0)) existing.source else requestedSource
+        val typeId = json.getString("typeId")
+        require(repo.getPinType(typeId) != null) { "압정 타입을 찾을 수 없습니다." }
+        val conditions = json.optJSONArray("conditions").objects().map { c ->
+            RuleCondition(
+                id = c.optString("id").ifEmpty { UUID.randomUUID().toString() },
+                field = RuleConditionField.valueOf(c.getString("field")),
+                operator = RuleConditionOperator.valueOf(c.getString("operator")),
+                value = c.getString("value"),
+            ).also { require(conditionValueValid(it)) { "조건 값을 확인하세요: ${it.value}" } }
+        }
+        val appMode = AppSelectionMode.valueOf(json.getString("appMode"))
+        val packages = json.optJSONArray("packages").strings().toSet()
+        require(source != PinRuleSource.NOTIFICATION || appMode == AppSelectionMode.EXCLUDE_SELECTED || packages.isNotEmpty()) {
+            "‘선택한 앱만’은 한 개 이상의 앱을 선택해야 합니다."
+        }
+        val priority = existing?.priority ?: ((
+            repo.pinRules()
+                .filter { it.source == source && !it.system && it.priority < 10_000 }
+                .maxOfOrNull { it.priority } ?: 90
+            ) + 10)
+        val rule = PinRule(
+            id = existing?.id ?: UUID.randomUUID().toString(),
+            name = json.getString("name").trim().ifBlank { "압정 룰" },
+            source = source,
+            system = existing?.system ?: false,
+            enabled = existing?.enabled ?: true,
+            hidden = existing?.hidden ?: false,
+            priority = priority,
+            pinTypeId = typeId,
+            titleOverride = json.optString("titleOverride").trim(),
+            bodyTemplate = json.optString("bodyTemplate").trim(),
+            appSelectionMode = appMode,
+            packageNames = packages,
+            conditionJoin = RuleConditionJoin.valueOf(json.getString("join")),
+            conditions = conditions,
+        )
+        repo.upsertPinRule(rule)
+        refreshRoutineShortcutsIfNeeded(rule)
+        // A rule moved away from ROUTINE must drop its shortcut too.
+        if (existing?.source == PinRuleSource.ROUTINE && rule.source != PinRuleSource.ROUTINE) graph.routineShortcutManager.refresh()
+    }
+
+    private suspend fun moveRule(id: String, delta: Int) {
+        val repo = graph.repository
+        val rules = repo.pinRules()
+        val rule = rules.firstOrNull { it.id == id } ?: error("규칙을 찾을 수 없습니다.")
+        val sameSource = rules.filter { it.source == rule.source }.sortedBy { it.priority }
+        val from = sameSource.indexOfFirst { it.id == id }
+        val to = (from + delta).coerceIn(0, sameSource.lastIndex)
+        if (to == from) return
+        val other = sameSource[to]
+        repo.upsertPinRule(rule.copy(priority = other.priority))
+        repo.upsertPinRule(other.copy(priority = rule.priority))
+    }
+
+    private suspend fun savePinType(json: JSONObject) {
+        val name = json.getString("name").trim()
+        val color = json.getString("color").trim().uppercase()
+        require(name.isNotEmpty()) { "타입 이름을 입력하세요." }
+        require(COLOR_HEX.matches(color)) { "색상은 #RRGGBB 형식이어야 합니다." }
+        val id = json.optString("id").takeIf { it.isNotEmpty() }
+            ?.also { require(graph.repository.getPinType(it) != null) { "타입을 찾을 수 없습니다." } }
+            ?: UUID.randomUUID().toString()
+        graph.repository.upsertPinType(
+            PinType(id = id, name = name, colorHex = color, icon = PinIcon.valueOf(json.getString("icon"))),
+        )
+    }
+
+    private suspend fun getInstalledApps(): JSONArray = withContext(Dispatchers.IO) {
+        val pm = context.packageManager
+        JSONArray().also { arr ->
+            pm.getInstalledApplications(0)
+                .map { pm.getApplicationLabel(it).toString() to it.packageName }
+                .sortedBy { it.first.lowercase() }
+                .forEach { (label, pkg) -> arr.put(JSONObject().put("label", label).put("packageName", pkg)) }
         }
     }
 
+    private suspend fun refreshRoutineShortcutsIfNeeded(rule: PinRule) {
+        if (rule.source == PinRuleSource.ROUTINE) graph.routineShortcutManager.refresh()
+    }
+
+    // ---- Permissions -------------------------------------------------------------
+
+    private fun permissionsJson() = JSONObject()
+        .put("location", hasLocationPermission())
+        .put("backgroundLocation", granted(Manifest.permission.ACCESS_BACKGROUND_LOCATION))
+        .put("sensitive", granted(Manifest.permission.READ_SMS) && granted(Manifest.permission.READ_CALL_LOG))
+        .put("notificationAccess", NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName))
+
+    private suspend fun requestPermission(kind: String) {
+        val appDetails = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+        when (kind) {
+            "location" -> {
+                host.requestPermissions(LOCATION_PERMISSIONS)
+                if (hasLocationPermission() && graph.preferences.current().trackingEnabled) TrackingService.start(context)
+            }
+            "sensitive" -> host.requestPermissions(SENSITIVE_PERMISSIONS)
+            // Android only grants "allow all the time" from the app's settings page.
+            "backgroundLocation", "appSettings" -> withContext(Dispatchers.Main) { host.startActivity(appDetails) }
+            "notificationAccess" -> withContext(Dispatchers.Main) { host.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+            "batteryOptimization" -> withContext(Dispatchers.Main) {
+                runCatching {
+                    host.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")))
+                }
+            }
+            else -> error("알 수 없는 권한입니다.")
+        }
+    }
+
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
     private fun hasLocationPermission(): Boolean =
-        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        granted(Manifest.permission.ACCESS_FINE_LOCATION) || granted(Manifest.permission.ACCESS_COARSE_LOCATION)
+
+    // ---- Offline maps --------------------------------------------------------------
+
+    private suspend fun getOfflineMaps(): JSONObject {
+        val regions = graph.offlineMapManager.list()
+        return JSONObject()
+            .put("days", JSONArray().also { arr -> graph.repository.trackDays().asReversed().forEach { arr.put(it.toString()) } })
+            .put(
+                "regions",
+                JSONArray().also { arr ->
+                    regions.forEach {
+                        arr.put(
+                            JSONObject()
+                                .put("id", it.id)
+                                .put("name", it.name)
+                                .put("completed", it.completedResources)
+                                .put("required", it.requiredResources)
+                                .put("bytes", it.completedBytes),
+                        )
+                    }
+                },
+            )
+            .put("download", graph.offlineMapManager.downloadState.value.toJson())
+    }
+
+    private suspend fun downloadOfflineMap(start: LocalDate, end: LocalDate) {
+        require(!start.isAfter(end)) { "시작일이 종료일보다 늦습니다." }
+        val zone = ZoneId.systemDefault()
+        val points = graph.repository.trackPointsBetween(
+            start.atStartOfDay(zone).toInstant().toEpochMilli(),
+            end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(),
+        )
+        // Returns once the download has started; progress arrives as "offline-changed" events.
+        graph.offlineMapManager.downloadTrackPeriod(points, start, end)
+    }
+
+    // ---- Backups ----------------------------------------------------------------------
+
+    /** One backup/restore at a time; leaving the screen must not abort an upload or a half-applied restore. */
+    private suspend fun exclusiveBackup(block: suspend () -> Any?): Any? {
+        check(backupBusy.compareAndSet(false, true)) { "다른 백업 작업이 진행 중입니다." }
+        try {
+            // Main, like the screens these replaced: Google sign-in shows UI; the managers move I/O off it themselves.
+            return withContext(NonCancellable + Dispatchers.Main) { block() }
+        } finally {
+            backupBusy.set(false)
+        }
+    }
+
+    private fun emitProgress(progress: BackupProgress) {
+        host.emit(
+            "backup-progress",
+            JSONObject()
+                .put("phase", progress.phase)
+                .put("fraction", progress.fraction.toDouble())
+                .put("detail", progress.detail ?: JSONObject.NULL)
+                .toString(),
+        )
+    }
+
+    private suspend fun exportBackup(password: String): JSONObject {
+        require(password.length >= 8) { "백업 비밀번호는 8자 이상이어야 합니다." }
+        val uri = host.createDocument("nodemap-${LocalDate.now()}.nodemap") ?: return JSONObject().put("cancelled", true)
+        val chars = password.toCharArray()
+        try {
+            graph.backupManager.export(uri, chars, ::emitProgress)
+        } finally {
+            chars.fill('\u0000')
+        }
+        return JSONObject().put("cancelled", false)
+    }
+
+    private suspend fun importBackup(password: String): JSONObject {
+        require(password.length >= 8) { "백업 비밀번호는 8자 이상이어야 합니다." }
+        val uri = host.openDocument() ?: return JSONObject().put("cancelled", true)
+        val chars = password.toCharArray()
+        try {
+            runCatching { graph.backupManager.restore(uri, chars, ::emitProgress) }
+                .getOrElse { error("복원 실패: 비밀번호 또는 파일을 확인하세요.") }
+            graph.routineShortcutManager.refresh()
+        } finally {
+            chars.fill('\u0000')
+        }
+        return JSONObject().put("cancelled", false)
+    }
+
+    private companion object {
+        val COLOR_HEX = Regex("^#[0-9A-F]{6}$")
+
+        val LOCATION_PERMISSIONS = buildList {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
+        }.toTypedArray()
+
+        val SENSITIVE_PERMISSIONS = buildList {
+            add(Manifest.permission.READ_SMS)
+            add(Manifest.permission.RECEIVE_SMS)
+            add(Manifest.permission.READ_CALL_LOG)
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.READ_CONTACTS)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.READ_MEDIA_AUDIO)
+            } else {
+                @Suppress("DEPRECATION")
+                add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }.toTypedArray()
+    }
 }
 
-private fun AppSettings.toJson() = JSONObject()
+private fun conditionValueValid(condition: RuleCondition): Boolean {
+    if (condition.value.isBlank()) return false
+    return when (condition.operator) {
+        RuleConditionOperator.REGEX, RuleConditionOperator.NOT_REGEX -> runCatching { Regex(condition.value) }.isSuccess
+        RuleConditionOperator.GREATER_OR_EQUAL, RuleConditionOperator.LESS_OR_EQUAL -> condition.value.toDoubleOrNull() != null
+        else -> true
+    }
+}
+
+private fun JSONArray?.objects(): List<JSONObject> = this?.let { arr -> List(arr.length()) { arr.getJSONObject(it) } }.orEmpty()
+
+private fun JSONArray?.strings(): List<String> = this?.let { arr -> List(arr.length()) { arr.getString(it) } }.orEmpty()
+
+internal fun AppSettings.toJson() = JSONObject()
+    .put("onboardingCompleted", onboardingCompleted)
     .put("trackingEnabled", trackingEnabled)
     .put("trackingPreset", trackingPreset.name)
     .put("reverseGeocodingEnabled", reverseGeocodingEnabled)
@@ -210,6 +543,20 @@ private fun AppSettings.toJson() = JSONObject()
     .put("detailWindowMinutes", detailWindowMinutes)
     .put("totalWindowMinutes", totalWindowMinutes)
     .put("cameraWindowMinutes", cameraWindowMinutes)
+
+internal fun OfflineDownloadState.toJson(): JSONObject = when (this) {
+    OfflineDownloadState.Idle -> JSONObject().put("state", "idle")
+    is OfflineDownloadState.Downloading -> JSONObject()
+        .put("state", "downloading").put("name", name).put("completed", completed).put("required", required).put("bytes", bytes)
+    is OfflineDownloadState.Complete -> JSONObject().put("state", "complete").put("name", name).put("bytes", bytes)
+    is OfflineDownloadState.Failed -> JSONObject().put("state", "failed").put("message", message)
+}
+
+private fun RemoteBackupMetadata.toJson() = JSONObject()
+    .put("id", id)
+    .put("createdAt", createdAt.toEpochMilli())
+    .put("expiresAt", expiresAt.toEpochMilli())
+    .put("sizeBytes", sizeBytes)
 
 private fun TrackPoint.toJsonRow() = JSONArray()
     .put(timestamp).put(latitude).put(longitude).put(accuracyMeters.toDouble())
@@ -228,8 +575,32 @@ private fun ResolvedPin.toJson() = JSONObject()
     .put("color", pinType.colorHex)
     .put("icon", pinType.icon.name)
 
-private fun kr.mooner510.data.PinType.toJson() = JSONObject()
+private fun PinType.toJson() = JSONObject()
     .put("id", id)
     .put("name", name)
     .put("color", colorHex)
     .put("icon", icon.name)
+
+private fun PinRule.toJson(usage: Long) = JSONObject()
+    .put("id", id)
+    .put("name", name)
+    .put("source", source.name)
+    .put("system", system)
+    .put("enabled", enabled)
+    .put("hidden", hidden)
+    .put("priority", priority)
+    .put("typeId", pinTypeId)
+    .put("titleOverride", titleOverride)
+    .put("bodyTemplate", bodyTemplate)
+    .put("appMode", appSelectionMode.name)
+    .put("packages", JSONArray(packageNames.toList()))
+    .put("join", conditionJoin.name)
+    .put(
+        "conditions",
+        JSONArray().also { arr ->
+            conditions.forEach {
+                arr.put(JSONObject().put("id", it.id).put("field", it.field.name).put("operator", it.operator.name).put("value", it.value))
+            }
+        },
+    )
+    .put("usage", usage)

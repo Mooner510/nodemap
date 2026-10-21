@@ -3,18 +3,30 @@ package kr.mooner510.map
 import android.content.Context
 import kr.mooner510.data.PreferencesStore
 import kr.mooner510.data.TrackPoint
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
-import org.maplibre.android.geometry.LatLngBounds
-import org.maplibre.android.offline.OfflineManager
-import org.maplibre.android.offline.OfflineRegion
-import org.maplibre.android.offline.OfflineRegionError
-import org.maplibre.android.offline.OfflineRegionStatus
-import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
+import java.io.File
+import java.io.IOException
+import java.net.URLEncoder
 import java.time.LocalDate
-import java.util.UUID
-import kotlin.math.cos
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 sealed interface OfflineDownloadState {
     data object Idle : OfflineDownloadState
@@ -36,200 +48,208 @@ data class OfflineRegionInfo(
     val completedBytes: Long,
 )
 
+/**
+ * Saves the map around recorded tracks into [TileCache], which the web map reads through the WebView.
+ * Every OpenFreeMap style the app offers shares the same tiles, so a region works in all of them.
+ */
 class OfflineMapManager(
     private val context: Context,
     private val preferences: PreferencesStore,
+    private val cache: TileCache,
 ) {
-    private val manager by lazy { OfflineManager.getInstance(context) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lock = Mutex()
+    private var job: Job? = null
+    @Volatile private var activeRegion: Long? = null
     private val _downloadState = MutableStateFlow<OfflineDownloadState>(OfflineDownloadState.Idle)
     val downloadState = _downloadState.asStateFlow()
 
-    suspend fun downloadTrackPeriod(
-        points: List<TrackPoint>,
-        startDay: LocalDate,
-        endDay: LocalDate,
-        paddingKm: Double = 3.0,
-    ) {
-        if (points.isEmpty()) {
-            _downloadState.value = OfflineDownloadState.Failed("선택한 기간에 저장된 위치가 없습니다.")
-            return
-        }
-
-        val minLat = points.minOf { it.latitude }
-        val maxLat = points.maxOf { it.latitude }
-        val minLon = points.minOf { it.longitude }
-        val maxLon = points.maxOf { it.longitude }
-        val centerLat = (minLat + maxLat) / 2.0
-        val latPadding = paddingKm / 111.0
-        val lonPadding = paddingKm / (
-            111.0 * cos(Math.toRadians(centerLat)).let { kotlin.math.abs(it) }.coerceAtLeast(0.2)
-        )
-        val label = if (startDay == endDay) {
-            "$startDay 이동 범위"
-        } else {
-            "$startDay ~ $endDay 이동 범위"
-        }
-
-        _downloadState.value = OfflineDownloadState.Downloading(
-            name = label,
-            completed = 0,
-            required = 0,
-            bytes = 0,
-        )
-        download(
-            name = label,
-            north = maxLat + latPadding,
-            east = maxLon + lonPadding,
-            south = minLat - latPadding,
-            west = minLon - lonPadding,
-            minZoom = 7.0,
-            maxZoom = 16.0,
-        )
+    init {
+        scope.launch { deleteLegacyNativeCache() }
     }
 
-    suspend fun download(
-        name: String,
-        north: Double,
-        east: Double,
-        south: Double,
-        west: Double,
-        minZoom: Double = 5.0,
-        maxZoom: Double = 16.0,
-    ) {
-        val style = preferences.current().mapStyleUri
-        val definition = runCatching {
-            OfflineTilePyramidRegionDefinition(
-                style,
-                // Padding can push the box past the poles / antimeridian, which LatLngBounds rejects.
-                LatLngBounds.from(
-                    north.coerceIn(-MAX_LATITUDE, MAX_LATITUDE),
-                    east.coerceIn(-180.0, 180.0),
-                    south.coerceIn(-MAX_LATITUDE, MAX_LATITUDE),
-                    west.coerceIn(-180.0, 180.0),
-                ),
-                minZoom,
-                maxZoom,
-                context.resources.displayMetrics.density.coerceIn(1f, 3f),
-                true,
-            )
-        }.getOrElse {
-            _downloadState.value = OfflineDownloadState.Failed(it.message ?: "잘못된 지도 범위입니다.")
-            return
-        }
-        val metadata = JSONObject().apply {
-            put("id", UUID.randomUUID().toString())
-            put("name", name)
-            put("createdAt", System.currentTimeMillis())
-        }.toString().toByteArray()
+    private val busy get() = job?.isActive == true
 
-        manager.createOfflineRegion(
-            definition,
-            metadata,
-            object : OfflineManager.CreateOfflineRegionCallback {
-                override fun onCreate(region: OfflineRegion) {
-                    // Stop the download and drop the observer once finished so the native region
-                    // doesn't stay active (and keep this callback alive) for the life of the process.
-                    fun finish() {
-                        region.setDownloadState(OfflineRegion.STATE_INACTIVE)
-                        region.setObserver(null)
+    suspend fun downloadTrackPeriod(points: List<TrackPoint>, startDay: LocalDate, endDay: LocalDate) = lock.withLock {
+        check(!busy) { "이미 저장 중입니다." }
+        require(points.isNotEmpty()) { "선택한 기간에 저장된 위치가 없습니다." }
+        val label = if (startDay == endDay) "$startDay 이동 범위" else "$startDay ~ $endDay 이동 범위"
+        _downloadState.value = OfflineDownloadState.Downloading(label, 0, 0, 0)
+        job = scope.launch {
+            run(label) {
+                val sources = prepareResources()
+                val tiles = sources.flatMapTo(HashSet()) { TileCoverage.tiles(it.key, points, it.minZoom, it.maxZoom) }
+                if (tiles.size > MAX_TILES) {
+                    throw IOException("저장할 지도가 너무 넓어요(타일 ${tiles.size}개). 기간을 줄여 주세요.")
+                }
+                cache.createRegion(label, tiles) to sources
+            }
+        }
+    }
+
+    /** Fetches what is still missing for a region that was interrupted. */
+    suspend fun resume(id: Long) = lock.withLock {
+        check(!busy) { "이미 저장 중입니다." }
+        val name = withContext(Dispatchers.IO) { cache.regionName(id) } ?: error("오프라인 지도를 찾을 수 없습니다.")
+        _downloadState.value = OfflineDownloadState.Downloading(name, 0, 0, 0)
+        job = scope.launch { run(name) { id to prepareResources() } }
+    }
+
+    suspend fun list(): List<OfflineRegionInfo> = withContext(Dispatchers.IO) { cache.regions() }
+
+    suspend fun delete(id: Long): Boolean = lock.withLock {
+        if (activeRegion == id) {
+            job?.cancelAndJoin()
+            _downloadState.value = OfflineDownloadState.Idle
+        }
+        withContext(Dispatchers.IO) { cache.deleteRegion(id) }
+    }
+
+    private suspend fun run(name: String, plan: suspend () -> Pair<Long, List<Source>>) {
+        val result = runCatching {
+            val (regionId, sources) = plan()
+            activeRegion = regionId
+            downloadRegion(name, regionId, sources)
+        }
+        activeRegion = null
+        _downloadState.value = result.getOrElse {
+            if (it is CancellationException) OfflineDownloadState.Idle
+            else OfflineDownloadState.Failed(it.message ?: "지도를 저장하지 못했습니다.")
+        }
+    }
+
+    private suspend fun downloadRegion(name: String, regionId: Long, sources: List<Source>): OfflineDownloadState {
+        val templates = sources.associate { it.key to it.template }
+        val missing = cache.missingTiles(regionId)
+        val info = cache.regions().first { it.id == regionId }
+        val total = info.requiredResources
+        val done = AtomicLong(total - missing.size)
+        val bytes = AtomicLong(info.completedBytes)
+        val consecutiveFailures = AtomicInteger()
+        val queue = ConcurrentLinkedQueue(missing)
+
+        coroutineScope {
+            val progress = launch {
+                while (isActive) {
+                    _downloadState.value = OfflineDownloadState.Downloading(name, done.get(), total, bytes.get())
+                    delay(PROGRESS_INTERVAL_MS)
+                }
+            }
+            List(PARALLEL_DOWNLOADS) {
+                launch {
+                    while (isActive && consecutiveFailures.get() < GIVE_UP_AFTER) {
+                        val tile = queue.poll() ?: break
+                        val size = templates[tile.source]?.let { template -> retry { cache.downloadTile(template, tile) } }
+                        if (size == null) {
+                            consecutiveFailures.incrementAndGet()
+                        } else {
+                            consecutiveFailures.set(0)
+                            done.incrementAndGet()
+                            bytes.addAndGet(size.toLong())
+                        }
                     }
-                    region.setObserver(object : OfflineRegion.OfflineRegionObserver {
-                        override fun onStatusChanged(status: OfflineRegionStatus) {
-                            _downloadState.value = if (status.isComplete) {
-                                finish()
-                                OfflineDownloadState.Complete(name, status.completedResourceSize)
-                            } else {
-                                OfflineDownloadState.Downloading(
-                                    name,
-                                    status.completedResourceCount,
-                                    status.requiredResourceCount,
-                                    status.completedResourceSize,
-                                )
-                            }
-                        }
-
-                        override fun onError(error: OfflineRegionError) {
-                            _downloadState.value = OfflineDownloadState.Failed(
-                                "${error.reason}: ${error.message}",
-                            )
-                        }
-
-                        override fun mapboxTileCountLimitExceeded(limit: Long) {
-                            finish()
-                            _downloadState.value = OfflineDownloadState.Failed(
-                                "오프라인 타일 제한 초과: $limit",
-                            )
-                        }
-                    })
-                    region.setDownloadState(OfflineRegion.STATE_ACTIVE)
                 }
+            }.forEach { it.join() }
+            progress.cancel()
+        }
 
-                override fun onError(error: String) {
-                    _downloadState.value = OfflineDownloadState.Failed(error)
-                }
-            },
-        )
+        val remaining = total - done.get()
+        if (consecutiveFailures.get() >= GIVE_UP_AFTER) {
+            throw IOException("지도 서버에 연결할 수 없어 멈췄어요. 남은 ${remaining}개는 이어 받기로 받을 수 있어요.")
+        }
+        if (remaining > 0) throw IOException("타일 ${remaining}개를 받지 못했어요. 이어 받기로 다시 시도할 수 있어요.")
+        return OfflineDownloadState.Complete(name, bytes.get())
     }
 
-    fun list(callback: (List<OfflineRegionInfo>) -> Unit) {
-        manager.listOfflineRegions(object : OfflineManager.ListOfflineRegionsCallback {
-            override fun onList(regions: Array<OfflineRegion>?) {
-                val available = regions.orEmpty()
-                if (available.isEmpty()) {
-                    callback(emptyList())
-                    return
-                }
-                val result = mutableListOf<OfflineRegionInfo>()
-                var remaining = available.size
-                available.forEach { region ->
-                    region.getStatus(object : OfflineRegion.OfflineRegionStatusCallback {
-                        override fun onStatus(status: OfflineRegionStatus?) {
-                            status?.let {
-                                result += OfflineRegionInfo(
-                                    region.id,
-                                    metadataName(region.metadata),
-                                    it.completedResourceCount,
-                                    it.requiredResourceCount,
-                                    it.completedResourceSize,
-                                )
-                            }
-                            remaining -= 1
-                            if (remaining == 0) callback(result.sortedBy { it.name })
-                        }
-
-                        override fun onError(error: String?) {
-                            remaining -= 1
-                            if (remaining == 0) callback(result.sortedBy { it.name })
-                        }
-                    })
-                }
-            }
-
-            override fun onError(error: String) {
-                callback(emptyList())
-            }
-        })
+    private suspend fun <T> retry(block: () -> T): T? {
+        repeat(3) { attempt ->
+            runCatching { return block() }
+            delay(500L shl attempt)
+        }
+        return null
     }
 
-    fun delete(id: Long, onDone: (Boolean) -> Unit) {
-        manager.getOfflineRegion(id, object : OfflineManager.GetOfflineRegionCallback {
-            override fun onRegion(region: OfflineRegion) {
-                region.delete(object : OfflineRegion.OfflineRegionDeleteCallback {
-                    override fun onDelete() = onDone(true)
-                    override fun onError(error: String) = onDone(false)
-                })
-            }
+    // ---- Styles and their resources ---------------------------------------------------
 
-            override fun onRegionNotFound() = onDone(false)
-            override fun onError(error: String) = onDone(false)
-        })
+    private class Source(val key: String, val template: String, val minZoom: Int, val maxZoom: Int)
+
+    /**
+     * Caches every style the app offers plus their TileJSON, sprites and Latin glyph ranges, and returns the
+     * tile sources to download. Hangul/CJK labels are drawn by maplibre with the system font, so their glyph
+     * ranges are not needed.
+     */
+    private suspend fun prepareResources(): List<Source> = withContext(Dispatchers.IO) {
+        val styleUris = (STYLE_URIS + preferences.current().mapStyleUri).distinct().filter { it.contains(TileCache.HOST) }
+        val sources = LinkedHashMap<String, Source>()
+        val fonts = HashSet<String>()
+        val sprites = HashSet<String>()
+        val glyphTemplates = HashSet<String>()
+        styleUris.forEach { uri ->
+            val style = runCatching { JSONObject(String(cache.prefetchResource(uri, force = true))) }
+                .getOrElse { throw IOException("지도 서버에 연결할 수 없어요.", it) }
+            style.optString("glyphs").takeIf { it.isNotEmpty() }?.let(glyphTemplates::add)
+            when (val sprite = style.opt("sprite")) {
+                is String -> sprites += sprite
+                is JSONArray -> for (i in 0 until sprite.length()) sprite.optJSONObject(i)?.optString("url")?.let(sprites::add)
+            }
+            val layers = style.optJSONArray("layers") ?: JSONArray()
+            for (i in 0 until layers.length()) {
+                val font = layers.optJSONObject(i)?.optJSONObject("layout")?.optJSONArray("text-font") ?: continue
+                // Only literal font stacks; the bundled styles don't use expressions here.
+                if ((0 until font.length()).all { font.opt(it) is String }) {
+                    fonts += (0 until font.length()).joinToString(",") { font.getString(it) }
+                }
+            }
+            val styleSources = style.optJSONObject("sources") ?: return@forEach
+            styleSources.keys().forEach { id ->
+                val src = styleSources.getJSONObject(id)
+                if (src.optString("type") !in setOf("vector", "raster")) return@forEach
+                val tileJson = src.optString("url").takeIf { it.isNotEmpty() }
+                    ?.let { JSONObject(String(cache.prefetchResource(it, force = true))) }
+                    ?: src
+                val template = tileJson.optJSONArray("tiles")?.optString(0)?.takeIf { it.isNotEmpty() } ?: return@forEach
+                val key = TileCache.tileKey(TileCache.tileUrl(template, TileKey("", 0, 0, 0)))?.source ?: return@forEach
+                sources.getOrPut(key) {
+                    Source(
+                        key = key,
+                        template = template,
+                        minZoom = tileJson.optInt("minzoom", 0),
+                        maxZoom = tileJson.optInt("maxzoom", MAX_ZOOM).coerceAtMost(MAX_ZOOM),
+                    )
+                }
+            }
+        }
+        sprites.forEach { base ->
+            listOf("", "@2x").forEach { ratio ->
+                listOf(".json", ".png").forEach { ext -> runCatching { cache.prefetchResource("$base$ratio$ext") } }
+            }
+        }
+        glyphTemplates.forEach { template ->
+            fonts.forEach { stack ->
+                val encoded = URLEncoder.encode(stack, "UTF-8").replace("+", "%20")
+                GLYPH_RANGES.forEach { range ->
+                    runCatching { cache.prefetchResource(template.replace("{fontstack}", encoded).replace("{range}", range)) }
+                }
+            }
+        }
+        if (sources.isEmpty()) throw IOException("이 지도 스타일은 오프라인 저장을 지원하지 않아요.")
+        sources.values.toList()
+    }
+
+    /** Regions saved by the native MapLibre SDK before the map moved into the WebView; nothing reads them now. */
+    private fun deleteLegacyNativeCache() {
+        listOfNotNull(context.filesDir, context.getExternalFilesDir(null)).forEach { dir ->
+            dir.listFiles { f: File -> f.name.startsWith("mbgl-offline.db") }?.forEach { it.delete() }
+        }
     }
 
     private companion object {
-        const val MAX_LATITUDE = 85.05112878
+        const val MAX_TILES = 30_000
+        const val MAX_ZOOM = 14
+        const val PARALLEL_DOWNLOADS = 4
+        const val GIVE_UP_AFTER = 24
+        const val PROGRESS_INTERVAL_MS = 250L
+        val STYLE_URIS = listOf("liberty", "bright", "positron", "dark").map { "https://${TileCache.HOST}/styles/$it" }
+        val GLYPH_RANGES = listOf("0-255", "256-511", "8192-8447")
     }
-
-    private fun metadataName(metadata: ByteArray): String = runCatching {
-        JSONObject(metadata.toString(Charsets.UTF_8)).optString("name", "오프라인 지도")
-    }.getOrDefault("오프라인 지도")
 }

@@ -33,6 +33,17 @@ const PATHS = {
   layers: 'm12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5',
   wifiOff: 'M3 3l18 18M8.500 8.500A10 10 0 0 0 2 11m5 3a6 6 0 0 1 4-1.700M12 18h.01',
   edit: 'M4 20h4L19 9l-4-4L4 16v4Zm9-13 4 4',
+  trash: 'M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  arrowUp: 'M12 19V5m-6 6 6-6 6 6',
+  arrowDown: 'M12 5v14m-6-6 6 6 6-6',
+  arrowRight: 'M5 12h14m-6-6 6 6-6 6',
+  eye: 'M2 12s3.500-7 10-7 10 7 10 7-3.500 7-10 7S2 12 2 12Zm10 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z',
+  refresh: 'M20 11a8 8 0 0 0-14.900-3M4 4v4h4m-4 5a8 8 0 0 0 14.900 3M20 20v-4h-4',
+  upload: 'M12 20V9m0 0-4 4m4-4 4 4M5 4h14',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Zm5-2 4 4',
+  apps: 'M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z',
+  checkCircle: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-13 0 3 3 5-6',
+  file: 'M14 3H6v18h12V7l-4-4Zm0 0v4h4',
 } as const
 
 export type IconName = keyof typeof PATHS

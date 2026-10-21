@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { bridge } from '../lib/bridge'
 import { useLiveData, useNow } from '../lib/hooks'
 import { fmtAgo, fmtClock, fmtDay, fmtDuration, DAY, MINUTE, dayKey, parseDayKey, relativeDay, startOfDay } from '../lib/time'
@@ -6,9 +6,12 @@ import { fmtDistance, routeDistance } from '../lib/geo'
 import type { Pin, Settings } from '../lib/types'
 import { Icon } from '../ui/Icon'
 import { Sheet, Spinner, cx, useToast } from '../ui/kit'
-import { MapView } from './MapView'
 import { Scrubber } from './Scrubber'
 import { DayPickerSheet, ManualPinSheet, PinBadge, PinCard } from './parts'
+
+// maplibre is most of the bundle: start fetching/compiling it right away, in parallel with the app shell and data.
+const mapModule = import('./MapView')
+const MapView = lazy(() => mapModule.then((m) => ({ default: m.MapView })))
 
 export function TimelineScreen({ settings }: { settings: Settings }) {
   const now = useNow(15_000)
@@ -102,7 +105,8 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
 
   return (
     <div className="absolute inset-0 overflow-hidden bg-surface2">
-      {data && (
+      {/* The map mounts before the timeline arrives so its style and tiles load alongside the query. */}
+      <Suspense fallback={null}>
         <MapView
           points={points}
           pins={pins}
@@ -118,7 +122,7 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
           onPinTap={(p) => setFocused(p)}
           onOffline={setOfflineMap}
         />
-      )}
+      </Suspense>
       {stillLoading && <div className="absolute inset-0 grid place-items-center"><Spinner size={32} /></div>}
       {error && !data && (
         <div className="absolute inset-0 grid place-items-center px-10 text-center text-fg2">기록을 불러오지 못했어요.<br />{error}</div>
@@ -154,7 +158,7 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
       </div>
 
       {/* Map controls */}
-      <div className="absolute right-4 z-10 flex flex-col gap-2.5" style={{ bottom: `calc(var(--tab-h) + var(--sab, 0px) + 32px + ${panelH}px)` }}>
+      <div className="absolute right-4 z-10 flex flex-col items-end gap-2.5" style={{ bottom: `calc(var(--tab-h) + var(--sab, 0px) + 32px + ${panelH}px)` }}>
         {away && (
           <button onClick={() => { jump(Date.now()); setRecenterKey((k) => k + 1) }} className="glass tap flex items-center gap-1.5 rounded-full px-4 py-2.5 text-[14px] font-bold text-accent">
             <Icon name="clock" size={17} />지금
@@ -200,7 +204,7 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
               radiusMinutes={settings.dialRadiusMinutes}
               rangeStart={rangeStart}
               rangeEnd={clock}
-              onStart={() => { setPreview(selected); setFocused(null) }}
+              onStart={(t) => { setPreview(t); setFocused(null) }}
               onPreview={setPreview}
               onCommit={(t) => { setSelected(t); setPreview(null); setFitKey((k) => k + 1) }}
             />

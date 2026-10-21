@@ -12,6 +12,7 @@ import kr.mooner510.data.NodeMapRepository
 import kr.mooner510.data.PreferencesStore
 import kr.mooner510.geocode.ReverseGeocoder
 import kr.mooner510.map.OfflineMapManager
+import kr.mooner510.map.TileCache
 import kr.mooner510.routine.RoutineShortcutManager
 
 class AppGraph(context: Context) {
@@ -22,7 +23,8 @@ class AppGraph(context: Context) {
     val repository = NodeMapRepository(db, crypto, attachmentStore)
     val preferences = PreferencesStore(appContext)
     val reverseGeocoder = ReverseGeocoder(appContext, repository, crypto, preferences)
-    val offlineMapManager = OfflineMapManager(appContext, preferences)
+    val tileCache = TileCache(appContext)
+    val offlineMapManager = OfflineMapManager(appContext, preferences, tileCache)
     val routineShortcutManager = RoutineShortcutManager(appContext, repository)
     val backupManager = BackupManager(appContext, repository, attachmentStore)
     private val googleBackupAuth = GoogleBackupAuth(BuildConfig.GOOGLE_SERVER_CLIENT_ID)

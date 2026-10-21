@@ -9,7 +9,7 @@ interface Props {
   radiusMinutes: number
   rangeStart: number
   rangeEnd: number
-  onStart: () => void
+  onStart: (t: number) => void
   onPreview: (t: number) => void
   onCommit: (t: number) => void
 }
@@ -17,6 +17,12 @@ interface Props {
 const HEIGHT = 92
 const PRECISION_HOLD_MS = 700
 const PRECISION_SCALE = 0.25
+const VELOCITY_WINDOW_MS = 100
+const MIN_VELOCITY_DT_MS = 16
+/** Exponential fling friction per ms (velocity keeps 0.35% after one second). */
+const FRICTION_K = -Math.log(0.0035) / 1000
+/** A fling travels at most this many visible ruler widths. */
+const MAX_FLING_SPANS = 4
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
 
@@ -152,7 +158,7 @@ export function Scrubber({ time, pins, tickMinutes, radiusMinutes, rangeStart, r
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const gesture = useRef<{ x: number; startX: number; startT: number; moved: boolean; vel: number; lastMove: number; hold?: number; inertia?: number } | null>(null)
+  const gesture = useRef<{ id: number; x: number; startX: number; moved: boolean; up: boolean; samples: { at: number; t: number }[]; hold?: number; inertia?: number; rearm?: () => void } | null>(null)
 
   const clamp = (t: number) => Math.min(latest.current.rangeEnd, Math.max(latest.current.rangeStart, t))
   const pxPerMs = () => {
@@ -170,42 +176,62 @@ export function Scrubber({ time, pins, tickMinutes, radiusMinutes, rangeStart, r
   }
 
   const onDown = (e: React.PointerEvent) => {
-    const c = canvas.current!
-    c.setPointerCapture(e.pointerId)
     const prev = gesture.current
+    // Only one finger drives the ruler; a second touch while the first is still down is ignored.
+    if (prev && !prev.up && prev.id !== e.pointerId) return
+    canvas.current!.setPointerCapture(e.pointerId)
     if (prev?.inertia) cancelAnimationFrame(prev.inertia)
-    const gs = { x: e.clientX, startX: e.clientX, startT: live.current, moved: false, vel: 0, lastMove: performance.now() } as NonNullable<typeof gesture.current>
+    window.clearTimeout(prev?.hold)
+    const gs: NonNullable<typeof gesture.current> = { id: e.pointerId, x: e.clientX, startX: e.clientX, moved: false, up: false, samples: [{ at: e.timeStamp, t: live.current }] }
     gesture.current = gs
     dragging.current = true
-    latest.current.onStart()
+    // Start from where the ruler is now — mid-fling that is not the last committed time.
+    latest.current.onStart(live.current)
     const arm = () => {
       gs.hold = window.setTimeout(() => setPrecise(true), PRECISION_HOLD_MS)
     }
     arm()
-    ;(gs as { rearm?: () => void }).rearm = () => { window.clearTimeout(gs.hold); arm() }
+    gs.rearm = () => { window.clearTimeout(gs.hold); arm() }
   }
 
   const onMove = (e: React.PointerEvent) => {
     const gs = gesture.current
-    if (!gs) return
+    if (!gs || gs.up || gs.id !== e.pointerId) return
     const dx = e.clientX - gs.x
     if (Math.abs(e.clientX - gs.startX) > 5) gs.moved = true
     if (dx === 0) return
-    const now = performance.now()
-    const dt = Math.max(1, now - gs.lastMove)
-    gs.lastMove = now
-    const dTime = -dx / pxPerMs()
-    gs.vel = dTime / dt
     gs.x = e.clientX
-    live.current = clamp(live.current + dTime)
-    if (!latest.current.precise) (gs as { rearm?: () => void }).rearm?.()
+    live.current = clamp(live.current - dx / pxPerMs())
+    gs.samples.push({ at: e.timeStamp, t: live.current })
+    while (gs.samples.length > 2 && gs.samples[0].at < e.timeStamp - VELOCITY_WINDOW_MS) gs.samples.shift()
+    if (!latest.current.precise) gs.rearm?.()
     latest.current.onPreview(live.current)
     schedule()
   }
 
+  /** Average velocity (ms of timeline per ms) over the last few samples, capped so a fling can't fly off. */
+  const releaseVelocity = (gs: NonNullable<typeof gesture.current>, at: number) => {
+    const recent = gs.samples.filter((s) => s.at >= at - VELOCITY_WINDOW_MS)
+    if (recent.length < 2) return 0
+    const first = recent[0]
+    const last = recent[recent.length - 1]
+    // Coalesced touch events can land a few ms apart; a too-short window would explode the velocity.
+    const dt = Math.max(MIN_VELOCITY_DT_MS, last.at - first.at)
+    const vel = (last.t - first.t) / dt
+    const visibleSpan = canvas.current!.clientWidth / pxPerMs()
+    const maxVel = MAX_FLING_SPANS * visibleSpan * FRICTION_K
+    return Math.max(-maxVel, Math.min(maxVel, vel))
+  }
+
+  const onCancel = (e: React.PointerEvent) => {
+    const gs = gesture.current
+    if (gs && !gs.up && gs.id === e.pointerId) finish()
+  }
+
   const onUp = (e: React.PointerEvent) => {
     const gs = gesture.current
-    if (!gs) return
+    if (!gs || gs.up || gs.id !== e.pointerId) return
+    gs.up = true
     window.clearTimeout(gs.hold)
     // A tap on a pin dot jumps straight to it.
     if (!gs.moved) {
@@ -221,17 +247,18 @@ export function Scrubber({ time, pins, tickMinutes, radiusMinutes, rangeStart, r
       return
     }
     // Fling with inertia.
-    let vel = Math.abs(performance.now() - gs.lastMove) < 60 ? gs.vel : 0
+    let vel = releaseVelocity(gs, e.timeStamp)
     if (latest.current.precise || Math.abs(vel) < 0.02 * (latest.current.radiusMinutes * MINUTE / 1000)) {
       finish()
       return
     }
     let last = performance.now()
     const step = (now: number) => {
-      const dt = now - last
+      // The first frame can carry a stale timestamp; never step backwards or by a huge gap.
+      const dt = Math.min(50, Math.max(0, now - last))
       last = now
       live.current = clamp(live.current + vel * dt)
-      vel *= Math.pow(0.0035, dt / 1000)
+      vel *= Math.exp(-FRICTION_K * dt)
       latest.current.onPreview(live.current)
       draw()
       if (Math.abs(vel) > 0.004 * (latest.current.radiusMinutes * MINUTE / 1000) && live.current > latest.current.rangeStart && live.current < latest.current.rangeEnd) {
@@ -262,7 +289,7 @@ export function Scrubber({ time, pins, tickMinutes, radiusMinutes, rangeStart, r
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        onPointerCancel={finish}
+        onPointerCancel={onCancel}
         className="block w-full touch-none"
         style={{ height: HEIGHT }}
       />

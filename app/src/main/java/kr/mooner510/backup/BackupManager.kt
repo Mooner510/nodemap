@@ -15,7 +15,6 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import javax.crypto.Cipher
 import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
@@ -32,20 +31,26 @@ class BackupManager(
         onProgress: BackupProgressListener = {},
     ) = withContext(Dispatchers.IO) {
         require(password.size >= 8) { "백업 비밀번호는 8자 이상이어야 합니다." }
-        val temp = File.createTempFile("nodemap-export-", ".zip", context.cacheDir)
         try {
-            onProgress(BackupProgress("데이터 읽는 중", 0f, "위치 기록"))
+            onProgress(BackupProgress("데이터 준비 중", 0f, "암호화 형식 정리"))
+            repository.migrateLegacyEncryption()
+            onProgress(BackupProgress("데이터 읽는 중", 0.05f, "위치 기록"))
             val points = repository.allTrackPoints()
-            onProgress(BackupProgress("데이터 읽는 중", 0.06f, "이벤트"))
+            onProgress(BackupProgress("데이터 읽는 중", 0.15f, "이벤트"))
             val events = repository.allEvents()
-            onProgress(BackupProgress("데이터 읽는 중", 0.1f, "설정과 첨부 목록"))
+            onProgress(BackupProgress("데이터 읽는 중", 0.2f, "설정과 첨부 목록"))
             val rules = repository.notificationRules()
             val templates = repository.pinTemplates()
             val pinTypes = repository.allPinTypes()
             val pinRules = repository.allPinRules()
             val attachments = repository.allAttachments()
 
-            ZipOutputStream(BufferedOutputStream(FileOutputStream(temp), BUFFER)).use { zip ->
+            val sink = context.contentResolver.openOutputStream(destination, "w")
+                ?: throw IOException("백업 파일을 열 수 없습니다.")
+            // Zip → segmented encryption → destination in one pass: no plaintext temp file, no second copy.
+            val encrypted = encryptingStream(BufferedOutputStream(sink, BUFFER), password)
+            val zip = ZipOutputStream(BufferedOutputStream(encrypted, BUFFER))
+            try {
                 zip.setLevel(Deflater.BEST_SPEED)
                 writeText(
                     zip,
@@ -57,10 +62,10 @@ class BackupManager(
                     }.toString(),
                 )
                 writeLines(zip, "track_points.jsonl", points, { it.exportJson().toString() }) { done ->
-                    onProgress(BackupProgress("데이터 정리 중", 0.12f + 0.2f * done / points.size, "위치 기록 $done / ${points.size}"))
+                    onProgress(BackupProgress("암호화하여 저장 중", 0.22f + 0.3f * done / points.size, "위치 기록 $done / ${points.size}"))
                 }
                 writeLines(zip, "events.jsonl", events, { it.exportJson().toString() }) { done ->
-                    onProgress(BackupProgress("데이터 정리 중", 0.32f + 0.05f * done / events.size, "이벤트 $done / ${events.size}"))
+                    onProgress(BackupProgress("암호화하여 저장 중", 0.52f + 0.08f * done / events.size, "이벤트 $done / ${events.size}"))
                 }
                 val idPayload = { id: String, payload: JSONObject -> JSONObject().apply { put("id", id); put("payload", payload) }.toString() }
                 writeLines(zip, "notification_rules.jsonl", rules, { idPayload(it.id, it.toJson()) })
@@ -72,7 +77,7 @@ class BackupManager(
                 zip.setLevel(Deflater.NO_COMPRESSION)
                 attachments.forEachIndexed { index, attachment ->
                     onProgress(
-                        BackupProgress("첨부파일 담는 중", 0.37f + 0.18f * index / attachments.size, "첨부파일 ${index + 1} / ${attachments.size}"),
+                        BackupProgress("첨부파일 담는 중", 0.6f + 0.4f * index / attachments.size, "첨부파일 ${index + 1} / ${attachments.size}"),
                     )
                     openAttachment(attachment)?.use { input ->
                         zip.putNextEntry(ZipEntry("attachments/${attachment.id}"))
@@ -80,19 +85,16 @@ class BackupManager(
                         zip.closeEntry()
                     }
                 }
-            }
-            val sink = context.contentResolver.openOutputStream(destination, "w")
-                ?: throw IOException("백업 파일을 열 수 없습니다.")
-            val total = temp.length()
-            sink.use { output ->
-                ProgressInputStream(FileInputStream(temp), total) { read, size ->
-                    onProgress(BackupProgress("암호화하여 저장 중", 0.55f + 0.45f * (read.toFloat() / size).coerceIn(0f, 1f), "${formatBackupBytes(read)} / ${formatBackupBytes(size)}"))
-                }.use { input -> encryptPortable(input, output.buffered(BUFFER), password) }
+                zip.close()
+            } catch (e: Throwable) {
+                // Leave no final segment, so a half-written file is rejected as truncated instead of
+                // restoring as a valid-looking but incomplete backup.
+                encrypted.abort()
+                throw e
             }
             onProgress(BackupProgress("완료", 1f))
         } finally {
             password.fill('\u0000')
-            temp.delete()
         }
     }
 
@@ -102,20 +104,17 @@ class BackupManager(
         onProgress: BackupProgressListener = {},
     ) = withContext(Dispatchers.IO) {
         require(password.size >= 8)
-        val temp = File.createTempFile("nodemap-restore-", ".zip", context.cacheDir)
         val unpack = File(context.cacheDir, "nodemap-restore-${System.nanoTime()}").apply { mkdirs() }
         try {
             val total = runCatching { context.contentResolver.openAssetFileDescriptor(source, "r")?.use { it.length } }.getOrNull() ?: -1L
             onProgress(BackupProgress("암호 해제 중", 0f, "비밀번호 키 생성"))
             val stream = context.contentResolver.openInputStream(source)
                 ?: throw IOException("백업 파일을 열 수 없습니다.")
+            // Decrypt straight into the unzipper: no decrypted temp archive written and read back.
             ProgressInputStream(stream, total) { read, size ->
                 val f = if (size > 0) (read.toFloat() / size).coerceIn(0f, 1f) else 0f
-                onProgress(BackupProgress("암호 해제 중", 0.35f * f, if (size > 0) "${formatBackupBytes(read)} / ${formatBackupBytes(size)}" else formatBackupBytes(read)))
-            }.use { input ->
-                FileOutputStream(temp).use { output -> decryptPortable(input, output.buffered(BUFFER), password) }
-            }
-            unzipSafely(temp, unpack) { f -> onProgress(BackupProgress("압축 해제 중", 0.35f + 0.1f * f)) }
+                onProgress(BackupProgress("암호 해제 중", 0.4f * f, if (size > 0) "${formatBackupBytes(read)} / ${formatBackupBytes(size)}" else formatBackupBytes(read)))
+            }.use { input -> unzipSafely(decryptingStream(BufferedInputStream(input, BUFFER), password), unpack) }
             onProgress(BackupProgress("데이터 분석 중", 0.45f))
             val manifest = JSONObject(File(unpack, "manifest.json").readText())
             val version = manifest.optInt("version")
@@ -189,7 +188,6 @@ class BackupManager(
             onProgress(BackupProgress("완료", 1f))
         } finally {
             password.fill('\u0000')
-            temp.delete()
             unpack.deleteRecursively()
         }
     }
@@ -202,33 +200,32 @@ class BackupManager(
         else -> null
     }
 
-    private fun encryptPortable(input: InputStream, output: OutputStream, password: CharArray) {
+    private fun encryptingStream(output: OutputStream, password: CharArray): GcmSegmentOutputStream {
         val random = SecureRandom()
         val salt = ByteArray(16).also(random::nextBytes)
-        val iv = ByteArray(12).also(random::nextBytes)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.ENCRYPT_MODE, deriveKey(password, salt), GCMParameterSpec(128, iv))
-        }
+        val nonce = ByteArray(12).also(random::nextBytes)
         output.write(MAGIC)
-        output.write(1)
+        output.write(FORMAT_SEGMENTED)
         output.write(salt.size)
         output.write(salt)
-        output.write(iv.size)
-        output.write(iv)
-        CipherOutputStream(output, cipher).use { input.copyTo(it, BUFFER) }
+        output.write(nonce.size)
+        output.write(nonce)
+        return GcmSegmentOutputStream(output, deriveKey(password, salt), nonce)
     }
 
-    private fun decryptPortable(input: InputStream, output: OutputStream, password: CharArray) {
-        val buffered = BufferedInputStream(input, BUFFER)
-        require(buffered.readExactly(MAGIC.size).contentEquals(MAGIC))
-        require(buffered.read() == 1)
-        val salt = buffered.readExactly(buffered.read().also { require(it in 16..64) })
-        val iv = buffered.readExactly(buffered.read().also { require(it in 12..32) })
+    private fun decryptingStream(input: InputStream, password: CharArray): InputStream {
+        require(input.readExactly(MAGIC.size).contentEquals(MAGIC)) { "NodeMap 백업 파일이 아닙니다." }
+        val format = input.read()
+        require(format == FORMAT_SINGLE_GCM || format == FORMAT_SEGMENTED) { "지원하지 않는 백업 암호화 형식입니다." }
+        val salt = input.readExactly(input.read().also { require(it in 16..64) })
+        val iv = input.readExactly(input.read().also { require(it in 12..32) })
+        val key = deriveKey(password, salt)
+        if (format == FORMAT_SEGMENTED) return GcmSegmentInputStream(input, key, iv)
+        // Old backups are one GCM message; Android buffers it whole before releasing any plaintext.
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.DECRYPT_MODE, deriveKey(password, salt), GCMParameterSpec(128, iv))
+            init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
         }
-        CipherInputStream(buffered, cipher).use { it.copyTo(output, BUFFER) }
-        output.flush()
+        return CipherInputStream(input, cipher)
     }
 
     private fun deriveKey(password: CharArray, salt: ByteArray): SecretKeySpec {
@@ -267,12 +264,8 @@ class BackupManager(
         file.useLines { lines -> lines.filter { it.isNotBlank() }.map(::JSONObject).toList() }
     }
 
-    private fun unzipSafely(zipFile: File, destination: File, onFraction: (Float) -> Unit) {
-        val total = zipFile.length()
-        val counted = ProgressInputStream(FileInputStream(zipFile), total) { read, size ->
-            onFraction((read.toFloat() / size).coerceIn(0f, 1f))
-        }
-        ZipInputStream(BufferedInputStream(counted, BUFFER)).use { zip ->
+    private fun unzipSafely(input: InputStream, destination: File) {
+        ZipInputStream(input).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 val output = File(destination, entry.name).canonicalFile
@@ -292,6 +285,8 @@ class BackupManager(
         private val MAGIC = "NODEMAP".toByteArray(Charsets.US_ASCII)
         private const val BUFFER = 256 * 1024
         private const val RESTORE_CHUNK = 2000
+        private const val FORMAT_SINGLE_GCM = 1
+        private const val FORMAT_SEGMENTED = 2
     }
 }
 

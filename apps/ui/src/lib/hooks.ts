@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge } from './bridge'
-import type { Settings } from './types'
+import type { PermissionKind, Permissions, Settings } from './types'
 
 export function useSettings() {
   const [settings, setSettings] = useState<Settings | null>(null)
   useEffect(() => {
     let alive = true
     bridge.getSettings().then((s) => alive && setSettings(s))
-    return () => { alive = false }
+    // Native can change settings on its own (biometric enrollment result, permission denied…).
+    const off = bridge.on('settings-changed', (s) => alive && setSettings(s))
+    return () => { alive = false; off() }
   }, [])
   const update = useCallback(async (patch: Partial<Settings>) => {
     // Optimistic: the native side is the source of truth and replies with the normalized value.
@@ -18,7 +20,7 @@ export function useSettings() {
       setSettings(await bridge.getSettings())
     }
   }, [])
-  return { settings, update }
+  return { settings, update, replace: setSettings }
 }
 
 /** Runs `fn` on mount and whenever native data changes (throttled), keeping the latest result. */
@@ -59,4 +61,24 @@ export function useNow(intervalMs = 30_000) {
     return () => window.clearInterval(id)
   }, [intervalMs])
   return now
+}
+
+/** Current permission state, re-read whenever the app returns from a system screen. */
+export function usePermissions() {
+  const [perms, setPerms] = useState<Permissions | null>(null)
+  useEffect(() => {
+    let alive = true
+    const load = () => bridge.getPermissions().then((p) => alive && setPerms(p))
+    load()
+    const off = bridge.on('resumed', load)
+    return () => { alive = false; off() }
+  }, [])
+  const request = useCallback(async (kind: PermissionKind) => {
+    try {
+      setPerms(await bridge.requestPermission({ kind }))
+    } catch {
+      // The system screen didn't open; the state is unchanged.
+    }
+  }, [])
+  return { perms, request }
 }

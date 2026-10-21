@@ -21,6 +21,7 @@ class NodeMapRepository(
     private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val changes = _changes.asSharedFlow()
     private val pinInitMutex = Mutex()
+    private val legacyMigrationMutex = Mutex()
     @Volatile private var pinConfigurationReady = false
 
     suspend fun insertTrackPoint(point: TrackPoint): Long = withContext(Dispatchers.IO) {
@@ -96,13 +97,13 @@ class NodeMapRepository(
         val writable = db.writableDatabase
         writable.beginTransaction()
         try {
-            points.forEach { point ->
-                val values = ContentValues().apply {
-                    put("timestamp", point.timestamp)
-                    put("day_key", dayKey(point.timestamp))
-                    put("payload", crypto.encrypt(point.toJson().toString().toByteArray()))
+            writable.compileStatement("INSERT INTO track_points(timestamp,day_key,payload) VALUES(?,?,?)").use { insert ->
+                points.forEach { point ->
+                    insert.bindLong(1, point.timestamp)
+                    insert.bindString(2, dayKey(point.timestamp))
+                    insert.bindBlob(3, crypto.encrypt(point.toJson().toString().toByteArray()))
+                    insert.executeInsert()
                 }
-                writable.insertOrThrow("track_points", null, values)
             }
             writable.setTransactionSuccessful()
         } finally {
@@ -687,6 +688,67 @@ class NodeMapRepository(
         _changes.tryEmit(Unit)
     }
 
+    /**
+     * Re-encrypts rows and attachment files still sealed directly with the Keystore key (pre-envelope
+     * format). Each of those costs a Keystore IPC per decrypt, which made timeline loads and backups crawl.
+     * Idempotent and resumable: only legacy blobs are touched, and a row is only overwritten if it is unchanged.
+     */
+    suspend fun migrateLegacyEncryption() = legacyMigrationMutex.withLock {
+        withContext(Dispatchers.IO) {
+            // Scanning every payload is a full-table read; once clean, skip it on later launches.
+            if (rawState(LEGACY_MIGRATED_KEY) != null) return@withContext
+            LEGACY_PAYLOAD_TABLES.forEach(::migrateLegacyRows)
+            var filesClean = true
+            queryAttachments(null, null).forEach { record ->
+                val file = java.io.File(record.encryptedPath)
+                if (record.encryptedPath.isBlank() || !file.isFile) return@forEach
+                runCatching {
+                    if (!crypto.isLegacyFile(file)) return@runCatching
+                    val temp = java.io.File(file.parentFile, file.name + ".migrating")
+                    crypto.openDecryptedFile(file).use { crypto.encryptFile(it, temp) }
+                    if (!temp.renameTo(file)) temp.delete()
+                    if (crypto.isLegacyFile(file)) filesClean = false
+                }.onFailure { filesClean = false }
+            }
+            val rowsClean = LEGACY_PAYLOAD_TABLES.all { table ->
+                scalarLong("SELECT COUNT(*) FROM $table WHERE substr(payload,1,1) = x'01'", emptyArray()) == 0L
+            }
+            if (filesClean && rowsClean) writeState(LEGACY_MIGRATED_KEY, "1")
+        }
+    }
+
+    private fun migrateLegacyRows(table: String) {
+        var lastRowId = 0L
+        while (true) {
+            val batch = db.readableDatabase.rawQuery(
+                "SELECT rowid,payload FROM $table WHERE rowid > ? AND substr(payload,1,1) = x'01' ORDER BY rowid LIMIT $LEGACY_MIGRATION_BATCH",
+                arrayOf(lastRowId.toString()),
+            ).use { cursor ->
+                buildList { while (cursor.moveToNext()) add(cursor.getLong(0) to cursor.getBlob(1)) }
+            }
+            if (batch.isEmpty()) return
+            lastRowId = batch.last().first
+            val migrated = batch.mapNotNull { (rowId, blob) ->
+                runCatching { Triple(rowId, blob, crypto.reencrypt(blob)) }.getOrNull()
+            }
+            val writable = db.writableDatabase
+            writable.beginTransaction()
+            try {
+                writable.compileStatement("UPDATE $table SET payload = ? WHERE rowid = ? AND payload = ?").use { update ->
+                    migrated.forEach { (rowId, old, new) ->
+                        update.bindBlob(1, new)
+                        update.bindLong(2, rowId)
+                        update.bindBlob(3, old)
+                        update.executeUpdateDelete()
+                    }
+                }
+                writable.setTransactionSuccessful()
+            } finally {
+                writable.endTransaction()
+            }
+        }
+    }
+
     // Used by backup code after v2. System defaults can be recreated, but user types/rules must be preserved.
     suspend fun allPinTypes(): List<PinType> = pinTypes()
     suspend fun allPinRules(): List<PinRule> = pinRules()
@@ -784,3 +846,15 @@ class NodeMapRepository(
 }
 
 private fun android.database.Cursor.strOrNull(index: Int): String? = if (isNull(index)) null else getString(index)
+
+private const val LEGACY_MIGRATION_BATCH = 500
+private const val LEGACY_MIGRATED_KEY = "legacy_encryption_migrated"
+private val LEGACY_PAYLOAD_TABLES = listOf(
+    "track_points",
+    "events",
+    "notification_rules",
+    "pin_templates",
+    "pin_types",
+    "pin_rules",
+    "geocode_cache",
+)

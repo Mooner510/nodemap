@@ -11,6 +11,10 @@ val backupServerUrl = providers.gradleProperty("NODEMAP_BACKUP_SERVER_URL")
 val googleServerClientId = providers.gradleProperty("NODEMAP_GOOGLE_SERVER_CLIENT_ID")
     .orElse(providers.environmentVariable("NODEMAP_GOOGLE_SERVER_CLIENT_ID"))
     .orElse("")
+// Debug builds load the Vite dev server from here (e.g. http://localhost:5173 via `adb reverse`) when set.
+val webDevUrl = providers.gradleProperty("NODEMAP_WEB_DEV_URL")
+    .orElse(providers.environmentVariable("NODEMAP_WEB_DEV_URL"))
+    .orElse("")
 
 // The UI lives in apps/ui (Vite + React). Its production bundle is packaged as assets under "ui/".
 // Pass -PskipWebUi to reuse an existing apps/ui/dist (e.g. when node isn't available).
@@ -51,11 +55,10 @@ android {
     }
     buildTypes {
         debug {
-            // Installs side by side with the release app (different package + signing key).
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
+            buildConfigField("String", "WEB_DEV_URL", webDevUrl.get().asBuildConfigString())
         }
         release {
+            buildConfigField("String", "WEB_DEV_URL", "\"\"")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -94,5 +97,4 @@ dependencies {
     implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
     implementation("com.google.android.libraries.identity.googleid:googleid:1.2.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("org.maplibre.gl:android-sdk-opengl:13.4.1")
 }

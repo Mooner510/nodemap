@@ -3,6 +3,7 @@ package kr.mooner510
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.webkit.WebSettings
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.activity.result.contract.ActivityResultContracts
@@ -75,7 +76,11 @@ class MainActivity : FragmentActivity() {
                 !settings.onboardingCompleted -> onUnlocked()
                 // BiometricPrompt silently refuses to show once the FragmentManager state is saved,
                 // which would leave the user on the spinner forever. Wait until STARTED.
-                settings.biometricLockEnabled -> withStarted { authenticate() }
+                settings.biometricLockEnabled -> {
+                    withStarted { authenticate() }
+                    // Load the WebView engine while the prompt is up, so the UI doesn't pay for it after unlock.
+                    runCatching { WebSettings.getDefaultUserAgent(this@MainActivity) }
+                }
                 else -> onUnlocked()
             }
         }

@@ -17,7 +17,58 @@ const OFFLINE_STYLE: StyleSpecification = {
 const prefersDark = () => window.matchMedia('(prefers-color-scheme: dark)').matches
 const resolveStyle = (uri: string) => (uri === LIBERTY && prefersDark() ? DARK : uri)
 
+/** The stock dark style is near-black with ~1.1:1 contrast between land, roads and water; lift them so the map reads. */
+const DARK_PAINT: Record<string, [string, string | ExpressionSpecification][]> = {
+  background: [['background-color', '#1a1d24']],
+  water: [['fill-color', '#0f2a44']],
+  waterway: [['line-color', '#0f2a44']],
+  landuse_residential: [['fill-color', '#1d2028']],
+  landcover_wood: [['fill-color', '#1b2b26']],
+  landuse_park: [['fill-color', '#1b2b26']],
+  building: [['fill-color', '#2b2f39'], ['fill-outline-color', '#3a3f4b']],
+  highway_path: [['line-color', '#4a505c']],
+  highway_minor: [['line-color', '#3d4350']],
+  highway_major_casing: [['line-color', '#1a1d24']],
+  highway_major_inner: [['line-color', '#5a6171']],
+  highway_major_subtle: [['line-color', '#4a505c']],
+  highway_motorway_casing: [['line-color', '#1a1d24']],
+  highway_motorway_inner: [['line-color', '#7c8496']],
+  highway_motorway_subtle: [['line-color', '#4a505c']],
+  railway: [['line-color', '#4a505c']],
+  railway_minor: [['line-color', '#4a505c']],
+  railway_transit: [['line-color', '#4a505c']],
+  boundary_state: [['line-color', '#5a6171']],
+  water_name: [['text-color', '#7fb2e5'], ['text-halo-color', '#0f2a44']],
+  highway_name_other: [['text-color', '#aeb6c4'], ['text-halo-color', '#14161b']],
+  highway_name_motorway: [['text-color', '#c4cad6'], ['text-halo-color', '#14161b']],
+  ...Object.fromEntries(
+    ['other', 'suburb', 'village', 'town', 'city', 'city_large', 'state'].map((k) => [
+      `place_${k}`,
+      [['text-color', '#d3d8e0'], ['text-halo-color', '#14161b']] as [string, string][],
+    ]),
+  ),
+}
+
+function brightenDark(map: maplibregl.Map) {
+  if (!(map.getStyle()?.name?.toLowerCase().includes('dark') ?? false)) return
+  for (const [id, props] of Object.entries(DARK_PAINT)) {
+    if (!map.getLayer(id)) continue
+    for (const [k, v] of props) map.setPaintProperty(id, k, v)
+  }
+}
+
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
+
+// The map mounts before the timeline loads; opening where it was last left lets the right tiles start streaming at once.
+const LAST_CAMERA_KEY = 'nm:lastCamera'
+function lastCamera(): { center: [number, number]; zoom: number } | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAST_CAMERA_KEY) ?? 'null')
+    return Array.isArray(v?.center) && typeof v.zoom === 'number' ? v : null
+  } catch {
+    return null
+  }
+}
 
 export interface MapViewProps {
   points: TrackPoint[]
@@ -67,11 +118,12 @@ export function MapView(props: MapViewProps) {
   // Create the map once.
   useEffect(() => {
     const first = props$.current.points[0]
+    const saved = lastCamera()
     const map = new maplibregl.Map({
       container: host.current!,
       style: resolveStyle(props$.current.styleUri),
-      center: first ? [first[2], first[1]] : [127.0276, 37.4979],
-      zoom: 14,
+      center: first ? [first[2], first[1]] : saved?.center ?? [127.0276, 37.4979],
+      zoom: saved?.zoom ?? 14,
       attributionControl: false,
       pitchWithRotate: false,
       dragRotate: false,
@@ -90,6 +142,14 @@ export function MapView(props: MapViewProps) {
         props$.current.onOffline(true)
         styleReady.current = false
         map.setStyle(OFFLINE_STYLE)
+      }
+    })
+    map.on('moveend', () => {
+      const c = map.getCenter()
+      try {
+        localStorage.setItem(LAST_CAMERA_KEY, JSON.stringify({ center: [c.lng, c.lat], zoom: map.getZoom() }))
+      } catch {
+        // Storage unavailable: next launch just opens at the default spot.
       }
     })
     map.on('click', (e) => {
@@ -124,6 +184,7 @@ export function MapView(props: MapViewProps) {
     const map = mapRef.current
     if (!map || !styleReady.current) return
     const dark = map.getStyle()?.name?.toLowerCase().includes('dark') ?? false
+    brightenDark(map)
     const casing = dark ? 'rgba(15,17,22,0.85)' : 'rgba(255,255,255,0.9)'
     if (!map.getSource('route')) {
       map.addSource('route', { type: 'geojson', data: EMPTY, tolerance: 0.4 })
@@ -214,7 +275,8 @@ export function MapView(props: MapViewProps) {
     map.fitBounds(bounds, {
       padding: { top: padding.top + 24, bottom: padding.bottom + 24, left: 48, right: 48 },
       maxZoom: 17,
-      duration: 500,
+      // The first frame after launch should land directly on the route.
+      duration: props.fitKey === 1 ? 0 : 500,
     })
   }, [props.fitKey])
 

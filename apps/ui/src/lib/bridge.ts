@@ -1,4 +1,4 @@
-import type { Bridge, NativeScreen, Settings } from './types'
+import type { Bridge, BridgeEvents, Settings } from './types'
 import { createMockBridge } from './mock'
 
 interface NativeHost {
@@ -19,7 +19,7 @@ declare global {
 function createNativeBridge(host: NativeHost): Bridge {
   let seq = 0
   const pending = new Map<number, { ok: (v: unknown) => void; fail: (e: Error) => void }>()
-  const listeners = new Set<() => void>()
+  const listeners = new Map<string, Set<(payload: never) => void>>()
 
   window.__nm = {
     resolve(id, ok, json) {
@@ -29,8 +29,11 @@ function createNativeBridge(host: NativeHost): Bridge {
       if (ok) p.ok(json ? JSON.parse(json) : undefined)
       else p.fail(new Error(json || '요청에 실패했습니다.'))
     },
-    emit(name) {
-      if (name === 'data-changed') listeners.forEach((l) => l())
+    emit(name, json) {
+      const set = listeners.get(name)
+      if (!set?.size) return
+      const payload = json ? JSON.parse(json) : undefined
+      set.forEach((l) => (l as (p: unknown) => void)(payload))
     },
     setInsets(top, bottom, left, right) {
       const s = document.documentElement.style
@@ -48,24 +51,30 @@ function createNativeBridge(host: NativeHost): Bridge {
       host.call(id, method, args === undefined ? '' : JSON.stringify(args))
     })
 
+  const on: Bridge['on'] = (name, cb) => {
+    let set = listeners.get(name)
+    if (!set) listeners.set(name, (set = new Set()))
+    set.add(cb as (payload: never) => void)
+    return () => { set.delete(cb as (payload: never) => void) }
+  }
+
+  // Each method forwards to the native method of the same name.
+  const methods = [
+    'getSettings', 'updateSettings', 'completeOnboarding', 'getTimeline', 'getPins', 'getPinTypes', 'addManualPin',
+    'getRuleEditor', 'saveRule', 'deleteRule', 'setRuleEnabled', 'setRuleHidden', 'moveRule', 'savePinType', 'deletePinType', 'getInstalledApps',
+    'getPermissions', 'requestPermission', 'getOfflineMaps', 'downloadOfflineMap', 'resumeOfflineMap', 'deleteOfflineMap',
+    'exportBackup', 'importBackup', 'cloudBackupConfigured', 'cloudBackupMetadata', 'cloudBackup', 'cloudRestore', 'cloudDelete',
+  ] as const satisfies readonly Exclude<keyof Bridge, 'isNative' | 'on' | 'onDataChanged'>[]
+  const forward = Object.fromEntries(methods.map((m) => [m, (args?: unknown) => call(m, args)]))
+
   return {
+    ...(forward as unknown as Omit<Bridge, 'isNative' | 'on' | 'onDataChanged'>),
     isNative: true,
-    getSettings: () => call('getSettings'),
-    updateSettings: (patch) => call('updateSettings', patch),
-    getTimeline: (r) => call('getTimeline', r),
-    getPins: (r) => call('getPins', r),
-    getPinTypes: () => call('getPinTypes'),
-    addManualPin: (i) => call('addManualPin', i),
-    getRules: () => call('getRules'),
-    setRuleEnabled: (i) => call('setRuleEnabled', i),
-    openNative: (s: NativeScreen) => call('openNative', { screen: s }),
-    onDataChanged(cb) {
-      listeners.add(cb)
-      return () => listeners.delete(cb)
-    },
+    on,
+    onDataChanged: (cb) => on('data-changed', cb),
   }
 }
 
 export const bridge: Bridge = window.NodeMapHost ? createNativeBridge(window.NodeMapHost) : createMockBridge()
 
-export type { Settings }
+export type { BridgeEvents, Settings }
