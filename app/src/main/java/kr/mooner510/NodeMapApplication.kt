@@ -1,7 +1,10 @@
 package kr.mooner510
 
 import android.app.Application
-import org.maplibre.android.MapLibre
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class NodeMapApplication : Application() {
     lateinit var graph: AppGraph
@@ -9,8 +12,10 @@ class NodeMapApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        MapLibre.getInstance(this)
         graph = AppGraph(this)
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { graph.repository.migrateLegacyEncryption() }
+        }
     }
 }
 

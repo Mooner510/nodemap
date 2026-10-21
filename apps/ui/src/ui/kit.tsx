@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type { BackupProgress } from '../lib/types'
 import { Icon, type IconName } from './Icon'
 
 export function cx(...c: (string | false | null | undefined)[]) {
@@ -127,7 +128,7 @@ export function Sheet({ open, onClose, title, children }: { open: boolean; onClo
   )
 }
 
-export function Button({ children, onClick, variant = 'primary', disabled, className }: { children: ReactNode; onClick?: () => void; variant?: 'primary' | 'soft' | 'ghost'; disabled?: boolean; className?: string }) {
+export function Button({ children, onClick, variant = 'primary', disabled, className }: { children: ReactNode; onClick?: () => void; variant?: 'primary' | 'soft' | 'ghost' | 'danger'; disabled?: boolean; className?: string }) {
   return (
     <button
       onClick={onClick}
@@ -137,6 +138,7 @@ export function Button({ children, onClick, variant = 'primary', disabled, class
         variant === 'primary' && 'bg-accent text-accentfg',
         variant === 'soft' && 'bg-accentsoft text-accent',
         variant === 'ghost' && 'text-fg2',
+        variant === 'danger' && 'bg-danger text-white',
         className,
       )}
     >
@@ -159,4 +161,143 @@ export function useToast() {
     </div>
   ) : null
   return { show, node }
+}
+
+export function Chip({ active, color, onClick, disabled, children }: { active: boolean; color?: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={cx('tap flex shrink-0 items-center gap-1.5 rounded-full px-4 py-2 text-[14px] font-semibold disabled:opacity-35', active ? 'text-white' : 'bg-surface2 text-fg2')}
+      style={active ? { background: color ?? 'var(--accent)' } : undefined}
+    >
+      {children}
+    </button>
+  )
+}
+
+export function TextField({ label, value, onChange, type = 'text', placeholder, error, hint, rows, autoFocus, mono }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  type?: 'text' | 'password'
+  placeholder?: string
+  error?: string | null
+  hint?: string
+  rows?: number
+  autoFocus?: boolean
+  mono?: boolean
+}) {
+  const cls = cx(
+    'w-full rounded-2xl bg-surface2 px-4 py-3.5 text-[16px] outline-none placeholder:text-fg3 focus:ring-2',
+    error ? 'ring-2 ring-danger/60 focus:ring-danger/60' : 'focus:ring-accent/50',
+    mono && 'font-mono text-[15px]',
+  )
+  return (
+    <label className="block">
+      <span className="mb-1.5 block px-1 text-[13px] font-semibold text-fg2">{label}</span>
+      {rows ? (
+        <textarea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows} autoFocus={autoFocus} className={cx(cls, 'resize-none')} />
+      ) : (
+        <input value={value} onChange={(e) => onChange(e.target.value)} type={type} placeholder={placeholder} autoFocus={autoFocus} autoComplete={type === 'password' ? 'off' : undefined} spellCheck={false} className={cls} />
+      )}
+      {(error || hint) && <span className={cx('mt-1.5 block px-1 text-[12px] leading-snug', error ? 'text-danger' : 'text-fg3')}>{error || hint}</span>}
+    </label>
+  )
+}
+
+/** A yes/no question as a bottom sheet (the WebView has no native confirm dialog). */
+export function ConfirmSheet({ open, title, message, confirmLabel, danger, onConfirm, onClose }: { open: boolean; title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void; onClose: () => void }) {
+  return (
+    <Sheet open={open} onClose={onClose} title={title}>
+      <div className="px-6 pb-6">
+        <p className="text-[15px] leading-relaxed text-fg2">{message}</p>
+        <div className="mt-6 flex gap-2">
+          <Button variant="ghost" className="flex-1 bg-surface2" onClick={onClose}>취소</Button>
+          <Button variant={danger ? 'danger' : 'primary'} className="flex-1" onClick={() => { onClose(); onConfirm() }}>{confirmLabel}</Button>
+        </div>
+      </div>
+    </Sheet>
+  )
+}
+
+/** Asks for the backup password (8+ chars) before a backup/restore starts. */
+export function PasswordSheet({ open, title, confirmLabel, onSubmit, onClose }: { open: boolean; title: string; confirmLabel: string; onSubmit: (password: string) => void; onClose: () => void }) {
+  const [pw, setPw] = useState('')
+  useEffect(() => {
+    if (!open) setPw('')
+  }, [open])
+  const ok = pw.length >= 8
+  return (
+    <Sheet open={open} onClose={onClose} title={title}>
+      <form className="space-y-5 px-6 pt-1 pb-6" onSubmit={(e) => { e.preventDefault(); if (ok) { onSubmit(pw); setPw(''); onClose() } }}>
+        <TextField label="백업 비밀번호" type="password" value={pw} onChange={setPw} autoFocus hint="8자 이상 · 서버에 저장되지 않아요. 잊으면 복원할 수 없어요." />
+        <button type="submit" disabled={!ok} className="tap w-full rounded-2xl bg-accent px-5 py-3.5 text-[16px] font-bold text-accentfg disabled:opacity-40">{confirmLabel}</button>
+      </form>
+    </Sheet>
+  )
+}
+
+const fmtSec = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`)
+
+/** Live status of a running backup/restore: step, percent, elapsed and estimated time left. */
+export function ProgressPanel({ progress, startedAt }: { progress: BackupProgress; startedAt: number }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 500)
+    return () => window.clearInterval(id)
+  }, [])
+  const fraction = Math.min(1, Math.max(0, progress.fraction))
+  const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000))
+  // Early fractions are too noisy (key derivation, DB reads) to extrapolate from.
+  const remaining = fraction >= 0.05 && elapsed >= 3 ? Math.round((elapsed * (1 - fraction)) / fraction) : null
+  return (
+    <div className="space-y-2" role="status" aria-live="polite">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[15px] font-bold">{progress.phase}</span>
+        <span className="num text-[15px] font-bold text-accent">{Math.round(fraction * 100)}%</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-surface2">
+        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${fraction * 100}%` }} />
+      </div>
+      {progress.detail && <p className="text-[13px] text-fg2">{progress.detail}</p>}
+      <p className="text-[12px] text-fg3">
+        경과 {fmtSec(elapsed)} · {remaining === null ? '남은 시간 계산 중' : `남은 시간 약 ${fmtSec(remaining)}`}
+        <br />작업이 끝날 때까지 앱을 닫지 마세요.
+      </p>
+    </div>
+  )
+}
+
+export function fmtBytes(bytes: number) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.floor(bytes / 1024)} KB`
+}
+
+/** Standard screen frame: large title, optional back button, scrolling body clear of the tab bar. */
+export function Screen({ title, onBack, children, header }: { title: string; onBack?: () => void; children: ReactNode; header?: ReactNode }) {
+  return (
+    <div className="absolute inset-0 flex flex-col">
+      <header className="safe-top shrink-0 px-5 pt-4 pb-1">
+        <div className="flex items-center gap-1">
+          {onBack && (
+            <button onClick={onBack} aria-label="뒤로" className="tap -ml-2 grid size-10 place-items-center rounded-xl text-fg2"><Icon name="chevronLeft" size={26} /></button>
+          )}
+          <h1 className="text-[28px] font-extrabold tracking-tight">{title}</h1>
+        </div>
+        {header}
+      </header>
+      <div className="scroll-y flex-1 px-4 pb-[calc(var(--tab-h)+var(--sab,0px)+32px)]">{children}</div>
+    </div>
+  )
+}
+
+export function GrantBadge() {
+  return <span className="flex shrink-0 items-center gap-1 rounded-full bg-ok/12 px-3 py-1.5 text-[13px] font-bold text-ok"><Icon name="check" size={15} strokeWidth={2.6} />완료</span>
+}
+
+export function ActionPill({ children, onClick, disabled }: { children: ReactNode; onClick: () => void; disabled?: boolean }) {
+  return <button onClick={onClick} disabled={disabled} className="tap shrink-0 rounded-full bg-accentsoft px-4 py-2 text-[14px] font-bold text-accent disabled:opacity-35">{children}</button>
 }

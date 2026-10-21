@@ -43,10 +43,12 @@ class CryptoManager(private val dataKeyFile: File) {
     private val hmacKey: SecretKey by lazy { (keyStore.getKey(HMAC_ALIAS, null) as? SecretKey) ?: createHmacKey() }
     private val random = SecureRandom()
     private val dataKey: SecretKey by lazy { loadOrCreateDataKey() }
+    // Cipher.getInstance does a provider lookup that dominates per-row crypto on bulk reads/writes.
+    private val rowCipher = ThreadLocal.withInitial { Cipher.getInstance(TRANSFORMATION) }
 
     fun encrypt(plain: ByteArray): ByteArray {
         val iv = ByteArray(IV_LENGTH).also(random::nextBytes)
-        val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, dataKey, GCMParameterSpec(128, iv)) }
+        val cipher = rowCipher.get()!!.apply { init(Cipher.ENCRYPT_MODE, dataKey, GCMParameterSpec(128, iv)) }
         val encrypted = cipher.doFinal(plain)
         return ByteArrayOutputStream(encrypted.size + iv.size + 2).use { output -> output.write(FORMAT_SOFTWARE); output.write(iv.size); output.write(iv); output.write(encrypted); output.toByteArray() }
     }
@@ -54,8 +56,14 @@ class CryptoManager(private val dataKeyFile: File) {
     fun decrypt(blob: ByteArray): ByteArray {
         val input = ByteArrayInputStream(blob); val version = input.read(); require(version == FORMAT_KEYSTORE || version == FORMAT_SOFTWARE)
         val ivLength = input.read(); require(ivLength in 12..32); val iv = input.readExactly(ivLength)
-        return Cipher.getInstance(TRANSFORMATION).run { init(Cipher.DECRYPT_MODE, keyFor(version), GCMParameterSpec(128, iv)); doFinal(input.readBytes()) }
+        val cipher = if (version == FORMAT_SOFTWARE) rowCipher.get()!! else Cipher.getInstance(TRANSFORMATION)
+        return cipher.run { init(Cipher.DECRYPT_MODE, keyFor(version), GCMParameterSpec(128, iv)); doFinal(input.readBytes()) }
     }
+
+    /** Blobs from before envelope encryption cost a Keystore IPC on every decrypt. */
+    fun isLegacy(blob: ByteArray): Boolean = blob.isNotEmpty() && blob[0].toInt() == FORMAT_KEYSTORE
+    fun reencrypt(blob: ByteArray): ByteArray = encrypt(decrypt(blob))
+    fun isLegacyFile(file: File): Boolean = FileInputStream(file).use { it.read() == FORMAT_KEYSTORE }
 
     fun encryptStream(input: InputStream, output: OutputStream) {
         val iv = ByteArray(IV_LENGTH).also(random::nextBytes)

@@ -25,6 +25,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 
 class MessageObserver(
     private val context: Context,
@@ -142,7 +144,13 @@ class MessageObserver(
         val last = repository.state("last_mms_id")?.toLongOrNull() ?: 0
         val cursor = context.contentResolver.query(
             Telephony.Mms.CONTENT_URI,
-            arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBJECT),
+            arrayOf(
+                Telephony.Mms._ID,
+                Telephony.Mms.DATE,
+                Telephony.Mms.MESSAGE_BOX,
+                Telephony.Mms.SUBJECT,
+                Telephony.Mms.SUBJECT_CHARSET,
+            ),
             "${Telephony.Mms._ID} > ?",
             arrayOf(last.toString()),
             "${Telephony.Mms._ID} ASC",
@@ -154,7 +162,7 @@ class MessageObserver(
                 newest = maxOf(newest, id)
                 val timestamp = row.getLong(1).let { if (it < 10_000_000_000L) it * 1_000L else it }
                 val box = row.getInt(2)
-                val subject = row.getString(3).orEmpty()
+                val subject = fixMmsSubject(row.getString(3).orEmpty(), row.getInt(4))
                 val direction = when (box) {
                     Telephony.Mms.MESSAGE_BOX_INBOX -> "수신"
                     Telephony.Mms.MESSAGE_BOX_SENT -> "발신"
@@ -201,6 +209,25 @@ class MessageObserver(
             }
         }
         if (newest > last) repository.setState("last_mms_id", newest.toString())
+    }
+
+    // Some providers decode the raw subject bytes as ISO-8859-1 regardless of sub_cs, yielding mojibake.
+    private fun fixMmsSubject(subject: String, charsetMib: Int): String {
+        if (subject.none { it.code >= 0x80 } || subject.any { it.code > 0xFF }) return subject
+        val charset = when (charsetMib) {
+            3 -> Charsets.US_ASCII
+            4 -> Charsets.ISO_8859_1
+            36, 38, 2026 -> charset("EUC-KR")
+            else -> Charsets.UTF_8
+        }
+        if (charset == Charsets.ISO_8859_1) return subject
+        return runCatching {
+            charset.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(subject.toByteArray(Charsets.ISO_8859_1)))
+                .toString()
+        }.getOrDefault(subject)
     }
 
     private fun mmsAddress(id: Long, box: Int): String {

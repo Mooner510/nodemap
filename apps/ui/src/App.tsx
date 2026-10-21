@@ -3,6 +3,7 @@ import { useSettings } from './lib/hooks'
 import { Icon, type IconName } from './ui/Icon'
 import { Spinner, cx } from './ui/kit'
 import { BackupScreen } from './screens/BackupScreen'
+import { OnboardingScreen } from './screens/OnboardingScreen'
 import { PinsScreen } from './screens/PinsScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
 import { TimelineScreen } from './screens/TimelineScreen'
@@ -15,9 +16,10 @@ const TABS: { id: string; label: string; icon: IconName }[] = [
 ]
 
 export function App() {
-  const { settings, update } = useSettings()
+  const { settings, update, replace } = useSettings()
   const [tab, setTab] = useState('timeline')
   if (!settings) return <div className="grid h-full place-items-center"><Spinner size={32} /></div>
+  if (!settings.onboardingCompleted) return <OnboardingScreen onDone={replace} />
 
   return (
     <div className="relative h-full overflow-hidden">

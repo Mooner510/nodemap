@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:android": "adb reverse tcp:5173 tcp:5173 && vite --strictPort --port 5173",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit"
   },
