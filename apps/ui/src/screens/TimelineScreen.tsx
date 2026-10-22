@@ -2,8 +2,9 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { bridge } from '../lib/bridge'
 import { useLiveData, useNow } from '../lib/hooks'
 import { fmtAgo, fmtClock, fmtDay, fmtDuration, DAY, MINUTE, dayKey, parseDayKey, relativeDay, startOfDay } from '../lib/time'
-import { fmtDistance, routeDistance } from '../lib/geo'
+import { cleanTrack, fmtDistance, routeDistance } from '../lib/geo'
 import type { Pin, Settings } from '../lib/types'
+import type { FrameKind, FrameRequest } from './MapView'
 import { Icon } from '../ui/Icon'
 import { Sheet, Spinner, cx, useToast } from '../ui/kit'
 import { Scrubber } from './Scrubber'
@@ -16,17 +17,21 @@ const MapView = lazy(() => mapModule.then((m) => ({ default: m.MapView })))
 export function TimelineScreen({ settings }: { settings: Settings }) {
   const now = useNow(15_000)
   const [selected, setSelected] = useState(() => Date.now())
+  // Live: the displayed time keeps up with the clock (and the newest fix) instead of staying where it was set.
+  const [live, setLive] = useState(true)
   const [preview, setPreview] = useState<number | null>(null)
+  const [liveTime, setLiveTime] = useState(() => Date.now())
   const scrubbing = preview !== null
-  const displayTime = preview ?? selected
+  const displayTime = preview ?? (live ? liveTime : selected)
   const day = dayKey(displayTime)
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
   const [daySheetOpen, setDaySheetOpen] = useState(false)
   const [focused, setFocused] = useState<Pin | null>(null)
-  const [recenterKey, setRecenterKey] = useState(0)
-  const [fitKey, setFitKey] = useState(0)
+  const [frame, setFrame] = useState<FrameRequest>({ key: 0, kind: 'jump' })
+  const requestFrame = useCallback((kind: FrameKind) => setFrame((f) => ({ key: f.key + 1, kind })), [])
+  const [following, setFollowing] = useState(true)
   const [offlineMap, setOfflineMap] = useState(false)
   const toast = useToast()
 
@@ -37,6 +42,8 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
     ro.observe(panel.current!)
     return () => ro.disconnect()
   }, [])
+
+  const padding = useMemo(() => ({ top: 110, bottom: panelH + 100 }), [panelH])
 
   const { total, detail, camera, dialRadiusMinutes } = {
     total: settings.totalWindowMinutes,
@@ -59,13 +66,15 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
   useEffect(() => {
     if (data && !firstFit.current) {
       firstFit.current = true
-      setFitKey((k) => k + 1)
+      requestFrame('jump')
     }
-  }, [data])
+  }, [data, requestFrame])
 
-  const points = data?.points ?? []
+  const points = useMemo(() => cleanTrack(data?.points ?? []), [data])
   const pins = data?.pins ?? []
   const clock = Math.max(now, Date.now())
+  const latestFix = data?.latest?.[0] ?? 0
+  useEffect(() => setLiveTime(Math.max(now, latestFix, Date.now())), [now, latestFix])
   const rangeStart = data?.days.length ? parseDayKey(data.days[0]) : clock - total * MINUTE
 
   const nearby = useMemo(
@@ -86,21 +95,30 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
 
   const jump = useCallback((t: number) => {
     setSelected(t)
+    setLive(false)
     setPreview(null)
-    setFitKey((k) => k + 1)
-  }, [])
+    requestFrame('jump')
+  }, [requestFrame])
+
+  const goLive = () => {
+    setLive(true)
+    setPreview(null)
+    setLiveTime(Date.now())
+    requestFrame('jump')
+  }
 
   const pickDay = (key: string) => {
+    if (key === dayKey(Date.now())) return goLive()
     const start = parseDayKey(key)
     const end = start + DAY
-    // Land on the last moment of the day that has data (or "now" for today).
+    // Land on the last moment of the day that has data.
     bridge.getTimeline({ start, end }).then((d) => {
       const last = Math.max(0, ...d.points.map((p) => p[0]), ...d.pins.map((p) => p.t))
       jump(Math.min(last || start + 12 * 60 * MINUTE, Date.now()))
     })
   }
 
-  const away = Math.abs(clock - displayTime) > 5 * MINUTE
+  const away = !live
   const stillLoading = !data && !error
 
   return (
@@ -116,9 +134,9 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
           totalWindowMinutes={total}
           cameraWindowMinutes={camera}
           scrubbing={scrubbing}
-          recenterKey={recenterKey}
-          fitKey={fitKey}
-          padding={{ top: 110, bottom: panelH + 100 }}
+          frame={frame}
+          padding={padding}
+          onFollowChange={setFollowing}
           onPinTap={(p) => setFocused(p)}
           onOffline={setOfflineMap}
         />
@@ -160,12 +178,17 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
       {/* Map controls */}
       <div className="absolute right-4 z-10 flex flex-col items-end gap-2.5" style={{ bottom: `calc(var(--tab-h) + var(--sab, 0px) + 32px + ${panelH}px)` }}>
         {away && (
-          <button onClick={() => { jump(Date.now()); setRecenterKey((k) => k + 1) }} className="glass tap flex items-center gap-1.5 rounded-full px-4 py-2.5 text-[14px] font-bold text-accent">
+          <button onClick={goLive} className="glass tap flex items-center gap-1.5 rounded-full px-4 py-2.5 text-[14px] font-bold text-accent">
             <Icon name="clock" size={17} />지금
           </button>
         )}
-        <button onClick={() => setRecenterKey((k) => k + 1)} aria-label="내 위치" className="glass tap grid size-12 place-items-center rounded-full text-fg">
-          <Icon name="locate" size={22} />
+        <button
+          onClick={() => requestFrame('locate')}
+          aria-label={following ? '표시된 위치로 확대' : '표시된 위치 따라가기'}
+          aria-pressed={following}
+          className={cx('glass tap grid size-12 place-items-center rounded-full transition-colors', following ? 'text-accent' : 'text-fg')}
+        >
+          <Icon name="locate" size={22} strokeWidth={following ? 2.4 : 1.9} />
         </button>
         <button onClick={() => setManualOpen(true)} aria-label="압정 추가" className="tap grid size-14 place-items-center rounded-full bg-accent text-accentfg shadow-[var(--shadow)]">
           <Icon name="plus" size={28} strokeWidth={2.4} />
@@ -179,7 +202,7 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
             <div>
               <div className="num text-[40px] leading-none font-extrabold tracking-tight">{fmtClock(displayTime)}</div>
               <div className="mt-1.5 text-[13px] text-fg2">
-                {scrubbing ? '드래그해서 이동 중' : away ? `${fmtAgo(displayTime, clock)}의 기록` : '지금'}
+                {scrubbing ? '드래그해서 이동 중' : live ? '지금' : `${fmtAgo(displayTime, clock)}의 기록`}
               </div>
             </div>
             <button onClick={() => setDaySheetOpen(true)} className="tap flex items-center gap-1.5 rounded-full bg-accentsoft px-3.5 py-2 text-[13px] font-bold text-accent">
@@ -198,15 +221,24 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
 
           <div className="pt-1 pb-1.5">
             <Scrubber
-              time={selected}
+              time={live ? liveTime : selected}
               pins={pins}
+              points={points}
               tickMinutes={settings.dialTickMinutes}
               radiusMinutes={settings.dialRadiusMinutes}
               rangeStart={rangeStart}
               rangeEnd={clock}
               onStart={(t) => { setPreview(t); setFocused(null) }}
               onPreview={setPreview}
-              onCommit={(t) => { setSelected(t); setPreview(null); setFitKey((k) => k + 1) }}
+              onCommit={(t) => {
+                // Letting go at the right end means "now", which then keeps up with new fixes.
+                const toLive = t >= Date.now() - MINUTE
+                setLive(toLive)
+                if (toLive) setLiveTime(Date.now())
+                setSelected(t)
+                setPreview(null)
+                requestFrame('commit')
+              }}
             />
           </div>
         </div>

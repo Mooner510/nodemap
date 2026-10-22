@@ -1,56 +1,74 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import maplibregl, { type ExpressionSpecification, type GeoJSONSource, type StyleSpecification } from 'maplibre-gl'
-import { positionAt, routeFeatures, lowerBound } from '../lib/geo'
+import maplibregl, { type ExpressionSpecification, type GeoJSONSource, type LngLatBoundsLike, type StyleSpecification } from 'maplibre-gl'
+import { positionAt, lowerBound } from '../lib/geo'
+import { DARK_ROUTE, LIGHT_ROUTE, RouteRenderer, markerLayer, routeLayer } from '../lib/routeLayer'
 import { MINUTE } from '../lib/time'
 import type { Pin, TrackPoint } from '../lib/types'
 
 const LIBERTY = 'https://tiles.openfreemap.org/styles/liberty'
 const DARK = 'https://tiles.openfreemap.org/styles/dark'
 
-/** Used when the tile server can't be reached so the route is still readable offline. */
-const OFFLINE_STYLE: StyleSpecification = {
+const offlineStyle = (dark: boolean): StyleSpecification => ({
   version: 8,
   sources: {},
-  layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#e8ebef' } }],
-}
+  layers: [{ id: 'bg', type: 'background', paint: { 'background-color': dark ? '#22262e' : '#e8ebef' } }],
+})
 
 const prefersDark = () => window.matchMedia('(prefers-color-scheme: dark)').matches
 const resolveStyle = (uri: string) => (uri === LIBERTY && prefersDark() ? DARK : uri)
 
-/** The stock dark style is near-black with ~1.1:1 contrast between land, roads and water; lift them so the map reads. */
-const DARK_PAINT: Record<string, [string, string | ExpressionSpecification][]> = {
-  background: [['background-color', '#1a1d24']],
-  water: [['fill-color', '#0f2a44']],
-  waterway: [['line-color', '#0f2a44']],
-  landuse_residential: [['fill-color', '#1d2028']],
-  landcover_wood: [['fill-color', '#1b2b26']],
-  landuse_park: [['fill-color', '#1b2b26']],
-  building: [['fill-color', '#2b2f39'], ['fill-outline-color', '#3a3f4b']],
-  highway_path: [['line-color', '#4a505c']],
-  highway_minor: [['line-color', '#3d4350']],
-  highway_major_casing: [['line-color', '#1a1d24']],
-  highway_major_inner: [['line-color', '#5a6171']],
-  highway_major_subtle: [['line-color', '#4a505c']],
-  highway_motorway_casing: [['line-color', '#1a1d24']],
-  highway_motorway_inner: [['line-color', '#7c8496']],
-  highway_motorway_subtle: [['line-color', '#4a505c']],
-  railway: [['line-color', '#4a505c']],
-  railway_minor: [['line-color', '#4a505c']],
-  railway_transit: [['line-color', '#4a505c']],
-  boundary_state: [['line-color', '#5a6171']],
-  water_name: [['text-color', '#7fb2e5'], ['text-halo-color', '#0f2a44']],
-  highway_name_other: [['text-color', '#aeb6c4'], ['text-halo-color', '#14161b']],
-  highway_name_motorway: [['text-color', '#c4cad6'], ['text-halo-color', '#14161b']],
+const LAND = '#22262e'
+const LABEL_HALO = '#15181d'
+
+/**
+ * The stock dark style is near-black with ~1.1:1 contrast between land, roads and water; lift them so the map reads.
+ * Keyed by the style's layer ids (the style JSON has no `name`, so dark-ness is tracked from the URI we asked for).
+ */
+const DARK_PAINT: Record<string, [string, string | number | ExpressionSpecification][]> = {
+  background: [['background-color', LAND]],
+  water: [['fill-color', '#163a5c']],
+  waterway: [['line-color', '#163a5c']],
+  landcover_ice_shelf: [['fill-color', '#2c313a']],
+  landcover_glacier: [['fill-color', '#2c313a']],
+  landuse_residential: [['fill-color', '#272b34'], ['fill-opacity', 1]],
+  landcover_wood: [['fill-color', '#1f3b30'], ['fill-opacity', 0.8]],
+  landuse_park: [['fill-color', '#1f3b30']],
+  building: [['fill-color', '#323844'], ['fill-outline-color', '#404754']],
+  'aeroway-area': [['fill-color', '#2c313a']],
+  'aeroway-taxiway': [['line-color', '#454c5a']],
+  'aeroway-runway-casing': [['line-color', '#2c313a']],
+  'aeroway-runway': [['line-color', '#454c5a']],
+  road_area_pier: [['fill-color', LAND]],
+  road_pier: [['line-color', LAND]],
+  highway_path: [['line-color', '#4f5665']],
+  highway_minor: [['line-color', '#464e5d'], ['line-opacity', 1]],
+  highway_major_casing: [['line-color', '#1a1d23']],
+  highway_major_inner: [['line-color', '#646d80']],
+  highway_major_subtle: [['line-color', '#4f5665']],
+  highway_motorway_casing: [['line-color', '#1a1d23']],
+  highway_motorway_inner: [['line-color', '#8f8166']],
+  highway_motorway_subtle: [['line-color', '#5d5747']],
+  railway: [['line-color', '#5a6170']],
+  railway_minor: [['line-color', '#5a6170']],
+  railway_transit: [['line-color', '#5a6170']],
+  railway_dashline: [['line-color', LAND]],
+  railway_minor_dashline: [['line-color', LAND]],
+  railway_transit_dashline: [['line-color', LAND]],
+  boundary_state: [['line-color', '#5f6676']],
+  'boundary_country_z0-4': [['line-color', '#7a8292']],
+  'boundary_country_z5-': [['line-color', '#7a8292']],
+  water_name: [['text-color', '#8dbbe8'], ['text-halo-color', '#163a5c']],
+  highway_name_other: [['text-color', '#b4bcc9'], ['text-halo-color', LABEL_HALO]],
+  highway_name_motorway: [['text-color', '#d0c4a8'], ['text-halo-color', LABEL_HALO]],
   ...Object.fromEntries(
-    ['other', 'suburb', 'village', 'town', 'city', 'city_large', 'state'].map((k) => [
+    ['other', 'suburb', 'village', 'town', 'city', 'city_large', 'state', 'country_other', 'country_minor', 'country_major'].map((k) => [
       `place_${k}`,
-      [['text-color', '#d3d8e0'], ['text-halo-color', '#14161b']] as [string, string][],
+      [['text-color', '#dfe3ea'], ['text-halo-color', LABEL_HALO]] as [string, string][],
     ]),
   ),
 }
 
 function brightenDark(map: maplibregl.Map) {
-  if (!(map.getStyle()?.name?.toLowerCase().includes('dark') ?? false)) return
   for (const [id, props] of Object.entries(DARK_PAINT)) {
     if (!map.getLayer(id)) continue
     for (const [k, v] of props) map.setPaintProperty(id, k, v)
@@ -70,6 +88,17 @@ function lastCamera(): { center: [number, number]; zoom: number } | null {
   }
 }
 
+/**
+ * - `commit`: a scrub ended — reframe only while following.
+ * - `jump`: moved to another time on purpose (day, pin, "now") — follow again and frame it.
+ * - `locate`: the locate button — follow again; when already framed, zoom in on the marker.
+ */
+export type FrameKind = 'commit' | 'jump' | 'locate'
+export interface FrameRequest {
+  key: number
+  kind: FrameKind
+}
+
 export interface MapViewProps {
   points: TrackPoint[]
   pins: Pin[]
@@ -79,15 +108,25 @@ export interface MapViewProps {
   totalWindowMinutes: number
   cameraWindowMinutes: number
   scrubbing: boolean
-  /** Bumped to fly to the current position. */
-  recenterKey: number
-  /** Bumped to fit the camera window of the displayed time. */
-  fitKey: number
+  frame: FrameRequest
   /** Screen areas covered by overlays, so the camera frames the route in the visible part only. */
   padding: { top: number; bottom: number }
+  /** Following turns off when the user moves the map by hand. */
+  onFollowChange: (following: boolean) => void
   onPinTap: (pin: Pin) => void
   onOffline: (offline: boolean) => void
 }
+
+/** Closest the camera frames a stop: about 450m across on a phone, enough to see the surrounding streets. */
+const FRAME_MAX_ZOOM = 15.8
+const LOCATE_ZOOM = 17
+/** How far from the edges the marker may roam (share of the visible area) before the camera follows it. */
+const COMFORT_FOLLOWING = 0.24
+const COMFORT_FREE = 0.14
+/** Time constant of the camera chasing the marker. */
+const CHASE_TAU_MS = 110
+const FRAME_MARGIN = { top: 32, bottom: 32, left: 44, right: 44 }
+const easeOutCubic = (x: number) => 1 - (1 - x) ** 3
 
 export function MapView(props: MapViewProps) {
   const host = useRef<HTMLDivElement>(null)
@@ -98,8 +137,19 @@ export function MapView(props: MapViewProps) {
   const usedFallback = useRef(false)
   // isStyleLoaded() also turns false while tiles stream in, so track style readiness ourselves.
   const styleReady = useRef(false)
+  // Whether the style currently requested is a dark one (the dark style JSON carries no name to tell by).
+  const darkStyle = useRef(false)
+  const renderer = useMemo(() => new RouteRenderer(), [])
+  const following = useRef(true)
+  const chaseRaf = useRef(0)
+  const chaseLast = useRef(0)
 
-  const route = useMemo(() => routeFeatures(props.points), [props.points])
+  const setFollowing = (v: boolean) => {
+    if (following.current === v) return
+    following.current = v
+    props$.current.onFollowChange(v)
+  }
+
   const pinFeatures = useMemo<GeoJSON.FeatureCollection>(
     () => ({
       type: 'FeatureCollection',
@@ -115,13 +165,60 @@ export function MapView(props: MapViewProps) {
     [props.pins],
   )
 
+  /** The part of the canvas not covered by overlays, in CSS px. */
+  const visibleArea = (map: maplibregl.Map) => {
+    const { top, bottom } = props$.current.padding
+    const c = map.getContainer()
+    return { left: 0, top, right: c.clientWidth, bottom: Math.max(top + 1, c.clientHeight - bottom) }
+  }
+
+  const stopChase = () => {
+    cancelAnimationFrame(chaseRaf.current)
+    chaseRaf.current = 0
+  }
+
+  /** Pans (never zooms) just enough to keep the marker inside the comfort area, easing like a spring. */
+  const chaseStep = (now: number) => {
+    chaseRaf.current = 0
+    const map = mapRef.current
+    const pos = renderer.frame.marker
+    if (!map || !pos) return
+    const dt = Math.min(64, Math.max(0, now - chaseLast.current))
+    chaseLast.current = now
+    const v = visibleArea(map)
+    const inset = following.current ? COMFORT_FOLLOWING : COMFORT_FREE
+    const ix = (v.right - v.left) * inset
+    const iy = (v.bottom - v.top) * inset
+    const p = map.project([pos.lng, pos.lat])
+    const dx = p.x < v.left + ix ? p.x - (v.left + ix) : p.x > v.right - ix ? p.x - (v.right - ix) : 0
+    const dy = p.y < v.top + iy ? p.y - (v.top + iy) : p.y > v.bottom - iy ? p.y - (v.bottom - iy) : 0
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return
+    // Far away (a fast fling, a subway hop): skip most of the way instead of sweeping across the city.
+    const far = Math.hypot(dx, dy)
+    const reach = Math.max(v.right - v.left, v.bottom - v.top)
+    const k = far > reach ? 1 - reach / 2 / far : 1 - Math.exp(-dt / CHASE_TAU_MS)
+    const c = map.project(map.getCenter())
+    map.jumpTo({ center: map.unproject([c.x + dx * k, c.y + dy * k]) })
+    chaseRaf.current = requestAnimationFrame(chaseStep)
+  }
+
+  const chase = () => {
+    if (chaseRaf.current) return
+    chaseLast.current = performance.now()
+    chaseRaf.current = requestAnimationFrame(chaseStep)
+  }
+
   // Create the map once.
   useEffect(() => {
     const first = props$.current.points[0]
     const saved = lastCamera()
     const map = new maplibregl.Map({
       container: host.current!,
-      style: resolveStyle(props$.current.styleUri),
+      style: (() => {
+        const uri = resolveStyle(props$.current.styleUri)
+        darkStyle.current = uri === DARK
+        return uri
+      })(),
       center: first ? [first[2], first[1]] : saved?.center ?? [127.0276, 37.4979],
       zoom: saved?.zoom ?? 14,
       attributionControl: false,
@@ -131,6 +228,7 @@ export function MapView(props: MapViewProps) {
     })
     map.touchZoomRotate.disableRotation()
     mapRef.current = map
+    renderer.map = map
     map.on('style.load', () => {
       styleReady.current = true
       setStyleVersion((v) => v + 1)
@@ -141,8 +239,14 @@ export function MapView(props: MapViewProps) {
         usedFallback.current = true
         props$.current.onOffline(true)
         styleReady.current = false
-        map.setStyle(OFFLINE_STYLE)
+        map.setStyle(offlineStyle(darkStyle.current))
       }
+    })
+    // Only gestures carry the DOM event; our own camera moves don't.
+    map.on('movestart', (e) => {
+      if (!(e as { originalEvent?: Event }).originalEvent) return
+      stopChase()
+      setFollowing(false)
     })
     map.on('moveend', () => {
       const c = map.getCenter()
@@ -162,10 +266,13 @@ export function MapView(props: MapViewProps) {
     const ro = new ResizeObserver(() => map.resize())
     ro.observe(host.current!)
     return () => {
+      stopChase()
       ro.disconnect()
       map.remove()
       mapRef.current = null
+      renderer.map = null
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Style changes from settings.
@@ -176,116 +283,125 @@ export function MapView(props: MapViewProps) {
     usedFallback.current = false
     props.onOffline(false)
     styleReady.current = false
-    mapRef.current?.setStyle(resolveStyle(props.styleUri))
+    const uri = resolveStyle(props.styleUri)
+    darkStyle.current = uri === DARK
+    mapRef.current?.setStyle(uri)
   }, [props.styleUri, props])
 
-  // (Re)create sources and layers whenever a style finishes loading.
+  // (Re)create layers whenever a style finishes loading, above everything the style draws (3D buildings and labels
+  // included) so nothing on the map hides the route: route, then pins, then the marker.
   useEffect(() => {
     const map = mapRef.current
     if (!map || !styleReady.current) return
-    const dark = map.getStyle()?.name?.toLowerCase().includes('dark') ?? false
-    brightenDark(map)
-    const casing = dark ? 'rgba(15,17,22,0.85)' : 'rgba(255,255,255,0.9)'
-    if (!map.getSource('route')) {
-      map.addSource('route', { type: 'geojson', data: EMPTY, tolerance: 0.4 })
-      const line = (id: string, color: string, width: number, extra: Record<string, unknown> = {}) =>
-        map.addLayer({
-          id,
-          type: 'line',
-          source: 'route',
-          layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': color, 'line-width': width, ...extra },
-        })
-      line('route-old-casing', casing, 7)
-      line('route-old', '#6aa6fa', 4)
-      line('route-detail-casing', casing, 9)
-      line('route-detail', '#1d5fe0', 6)
-      line('route-gap', '#f59e0b', 3, { 'line-dasharray': [1.6, 1.6] })
-    }
+    const dark = darkStyle.current
+    if (dark) brightenDark(map)
+    renderer.palette = dark ? DARK_ROUTE : LIGHT_ROUTE
+    if (!map.getLayer('route')) map.addLayer(routeLayer('route', renderer))
     if (!map.getSource('pins')) {
       map.addSource('pins', { type: 'geojson', data: EMPTY })
       map.addLayer({ id: 'pins-halo', type: 'circle', source: 'pins', paint: { 'circle-radius': 15, 'circle-color': ['get', 'color'], 'circle-opacity': 0.22 } })
       map.addLayer({ id: 'pins', type: 'circle', source: 'pins', paint: { 'circle-radius': 8, 'circle-color': ['get', 'color'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 3 } })
     }
-    if (!map.getSource('now')) {
-      map.addSource('now', { type: 'geojson', data: EMPTY })
-      map.addLayer({ id: 'now-halo', type: 'circle', source: 'now', paint: { 'circle-radius': 20, 'circle-color': '#3182f6', 'circle-opacity': 0.2 } })
-      map.addLayer({ id: 'now', type: 'circle', source: 'now', paint: { 'circle-radius': 9, 'circle-color': '#3182f6', 'circle-stroke-color': '#fff', 'circle-stroke-width': 3.5 } })
-    }
-    ;(map.getSource('route') as GeoJSONSource).setData(route)
+    if (!map.getLayer('marker')) map.addLayer(markerLayer('marker', renderer))
     ;(map.getSource('pins') as GeoJSONSource).setData(pinFeatures)
-  }, [styleVersion, route, pinFeatures])
+  }, [styleVersion, pinFeatures, renderer])
 
-  // Time-dependent look: only filters/paint expressions change while scrubbing — no geometry is rebuilt.
-  const { renderTime, detailWindowMinutes, totalWindowMinutes } = props
+  useEffect(() => renderer.setPoints(props.points), [props.points, renderer])
+
+  // Time-dependent look. The route only needs new uniforms; pins change filters, so they move in coarser steps.
+  const { renderTime, detailWindowMinutes, totalWindowMinutes, points } = props
+  const pinTime = Math.floor(renderTime / 15_000) * 15_000
+  useEffect(() => {
+    const pos = positionAt(points, renderTime)
+    renderer.setFrame({
+      time: renderTime,
+      detailMs: detailWindowMinutes * MINUTE,
+      totalMs: totalWindowMinutes * MINUTE,
+      aheadMs: totalWindowMinutes * MINUTE,
+      marker: pos && { lng: pos.lng, lat: pos.lat },
+    })
+    if (props$.current.scrubbing || following.current) chase()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderTime, detailWindowMinutes, totalWindowMinutes, points, renderer])
+
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !styleReady.current || !map.getLayer('route-old')) return
-    const total = renderTime - totalWindowMinutes * MINUTE
-    const detail = renderTime - detailWindowMinutes * MINUTE
+    if (!map || !styleReady.current || !map.getLayer('pins')) return
+    const total = pinTime - totalWindowMinutes * MINUTE
     const t: ExpressionSpecification = ['get', 't']
-    const solid: ExpressionSpecification = ['==', ['get', 'gap'], 0]
-    const old: ExpressionSpecification = ['all', solid, ['>', t, total], ['<=', t, detail]]
-    const recent: ExpressionSpecification = ['all', solid, ['>', t, detail], ['<=', t, renderTime]]
-    map.setFilter('route-old', old)
-    map.setFilter('route-old-casing', old)
-    map.setFilter('route-detail', recent)
-    map.setFilter('route-detail-casing', recent)
-    map.setFilter('route-gap', ['all', ['==', ['get', 'gap'], 1], ['>', t, total], ['<=', t, renderTime]])
-    const visible: ExpressionSpecification = ['all', ['>', t, total], ['<=', t, renderTime + 1000]]
+    const visible: ExpressionSpecification = ['all', ['>', t, total], ['<=', t, pinTime + 15_000]]
     map.setFilter('pins', visible)
     map.setFilter('pins-halo', visible)
-    const age: ExpressionSpecification = ['interpolate', ['linear'], ['-', renderTime, t], 0, 1, totalWindowMinutes * MINUTE, 0.4]
+    const age: ExpressionSpecification = ['interpolate', ['linear'], ['-', pinTime, t], 0, 1, totalWindowMinutes * MINUTE, 0.4]
     map.setPaintProperty('pins', 'circle-opacity', age)
     map.setPaintProperty('pins', 'circle-stroke-opacity', age)
+  }, [pinTime, totalWindowMinutes, styleVersion])
 
-    const pos = positionAt(props$.current.points, renderTime)
-    ;(map.getSource('now') as GeoJSONSource | undefined)?.setData(
-      pos ? { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [pos.lng, pos.lat] } } : EMPTY,
-    )
-
-    // While dragging, only pan when the marker nears the edge of the visible area.
-    if (props$.current.scrubbing && pos) {
-      const { top, bottom } = props$.current.padding
-      const p = map.project([pos.lng, pos.lat])
-      const h = map.getContainer().clientHeight
-      const w = map.getContainer().clientWidth
-      if (p.x < 60 || p.x > w - 60 || p.y < top + 40 || p.y > h - bottom - 40) {
-        map.easeTo({ center: [pos.lng, pos.lat], duration: 220 })
-      }
-    }
-  }, [renderTime, detailWindowMinutes, totalWindowMinutes, styleVersion, route])
-
-  // Camera: frame the camera window when a scrub ends / the day changes.
+  // Camera framing on request.
   useEffect(() => {
     const map = mapRef.current
-    if (!map || props.fitKey === 0) return
-    const { renderTime: rt, cameraWindowMinutes, points, padding } = props$.current
+    const { key, kind } = props.frame
+    if (!map || key === 0) return
+    const { renderTime: rt, cameraWindowMinutes, points } = props$.current
+    const pos = positionAt(points, rt)
+    if (!pos) return
+    stopChase()
+    const wasFollowing = following.current
+    if (kind !== 'commit') setFollowing(true)
+    const v = visibleArea(map)
+    const centerOffset: [number, number] = [0, (v.top - (map.getContainer().clientHeight - v.bottom)) / 2]
+
+    if (!following.current) {
+      // A map the user moved stays put unless the marker has left the screen.
+      const p = map.project([pos.lng, pos.lat])
+      if (p.x >= v.left + 24 && p.x <= v.right - 24 && p.y >= v.top + 24 && p.y <= v.bottom - 24) return
+      map.easeTo({ center: [pos.lng, pos.lat], offset: centerOffset, duration: 450, easing: easeOutCubic })
+      return
+    }
+
+    // Frame the recent stretch of route that led here.
     const from = lowerBound(points, rt - cameraWindowMinutes * MINUTE)
     const to = lowerBound(points, rt + 1)
-    const slice = points.slice(from, to)
-    const pos = positionAt(points, rt)
-    if (!slice.length && !pos) return
-    const bounds = new maplibregl.LngLatBounds()
-    slice.forEach((p) => bounds.extend([p[2], p[1]]))
-    if (pos) bounds.extend([pos.lng, pos.lat])
-    // A stationary stretch collapses to a point; keep a ~250m minimum frame so the map stays readable.
-    const c = bounds.getCenter()
-    bounds.extend([c.lng - 0.0016, c.lat - 0.0012]).extend([c.lng + 0.0016, c.lat + 0.0012])
-    map.fitBounds(bounds, {
-      padding: { top: padding.top + 24, bottom: padding.bottom + 24, left: 48, right: 48 },
-      maxZoom: 17,
-      // The first frame after launch should land directly on the route.
-      duration: props.fitKey === 1 ? 0 : 500,
-    })
-  }, [props.fitKey])
+    const bounds = new maplibregl.LngLatBounds([pos.lng, pos.lat], [pos.lng, pos.lat])
+    for (let i = from; i < to; i++) bounds.extend([points[i][2], points[i][1]])
+    const container = map.getContainer()
+    const margin = {
+      top: v.top + FRAME_MARGIN.top,
+      bottom: container.clientHeight - v.bottom + FRAME_MARGIN.bottom,
+      left: FRAME_MARGIN.left,
+      right: FRAME_MARGIN.right,
+    }
+    const cam = map.cameraForBounds(bounds as LngLatBoundsLike, { padding: margin, maxZoom: FRAME_MAX_ZOOM })
+    if (!cam || cam.zoom === undefined || !cam.center) return
+    const zoom = map.getZoom()
 
-  useEffect(() => {
-    const map = mapRef.current
-    if (!map || props.recenterKey === 0) return
-    const pos = positionAt(props$.current.points, props$.current.renderTime)
-    if (pos) map.flyTo({ center: [pos.lng, pos.lat], zoom: Math.max(map.getZoom(), 16), duration: 600 })
-  }, [props.recenterKey])
+    // The first frame after launch lands directly on the route.
+    if (key === 1) {
+      map.jumpTo({ center: cam.center, zoom: cam.zoom })
+      return
+    }
+
+    // Already showing all of it at a similar scale: leave the camera alone rather than nudge it on every scrub.
+    const sw = map.project(bounds.getSouthWest())
+    const ne = map.project(bounds.getNorthEast())
+    const inView = Math.min(sw.x, ne.x) >= v.left + 12 && Math.max(sw.x, ne.x) <= v.right - 12 && Math.min(sw.y, ne.y) >= v.top + 12 && Math.max(sw.y, ne.y) <= v.bottom - 12
+    const settled = inView && cam.zoom - zoom < 0.75 && zoom - cam.zoom < 1.25
+    if (settled) {
+      if (kind === 'locate' && wasFollowing) {
+        map.easeTo({ center: [pos.lng, pos.lat], offset: centerOffset, zoom: Math.max(zoom, LOCATE_ZOOM), duration: 500, easing: easeOutCubic })
+      }
+      return
+    }
+
+    const target = map.project(cam.center)
+    const dist = Math.hypot(target.x - container.clientWidth / 2, target.y - container.clientHeight / 2)
+    if (dist > 2.5 * Math.max(container.clientWidth, container.clientHeight) || Math.abs(cam.zoom - zoom) > 3) {
+      map.flyTo({ center: cam.center, zoom: cam.zoom, speed: 1.6, curve: 1.42, maxDuration: 1600 })
+    } else {
+      map.easeTo({ center: cam.center, zoom: cam.zoom, duration: Math.min(750, 380 + dist * 0.3), easing: easeOutCubic })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.frame])
 
   // maplibre's stylesheet forces position:relative on its container, so keep it inside a plain absolute wrapper.
   return (
