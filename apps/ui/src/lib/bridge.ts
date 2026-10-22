@@ -62,7 +62,7 @@ function createNativeBridge(host: NativeHost): Bridge {
   const methods = [
     'getSettings', 'updateSettings', 'completeOnboarding', 'getTimeline', 'getPins', 'getPinTypes', 'addManualPin',
     'getRuleEditor', 'saveRule', 'deleteRule', 'setRuleEnabled', 'setRuleHidden', 'moveRule', 'savePinType', 'deletePinType', 'getInstalledApps',
-    'getPermissions', 'requestPermission', 'getOfflineMaps', 'downloadOfflineMap', 'resumeOfflineMap', 'deleteOfflineMap',
+    'getPermissions', 'requestPermission', 'getOfflineMaps', 'downloadAllOfflineMaps', 'deleteOfflineMap',
     'exportBackup', 'importBackup', 'cloudBackupConfigured', 'cloudBackupMetadata', 'cloudBackup', 'cloudRestore', 'cloudDelete',
   ] as const satisfies readonly Exclude<keyof Bridge, 'isNative' | 'on' | 'onDataChanged'>[]
   const forward = Object.fromEntries(methods.map((m) => [m, (args?: unknown) => call(m, args)]))

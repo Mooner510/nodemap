@@ -42,7 +42,6 @@ import kr.mooner510.tracking.TrackingService
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
-import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -143,12 +142,9 @@ class WebUiBridge(
         }
 
         "getOfflineMaps" -> getOfflineMaps()
-        "downloadOfflineMap" -> {
-            downloadOfflineMap(LocalDate.parse(args.getString("start")), LocalDate.parse(args.getString("end")))
-            null
-        }
-        "resumeOfflineMap" -> {
-            graph.offlineMapManager.resume(args.getLong("id"))
+        "downloadAllOfflineMaps" -> {
+            // Returns once the download has started; progress arrives as "offline-changed" events.
+            graph.offlineMapManager.downloadAll()
             null
         }
         "deleteOfflineMap" -> {
@@ -415,7 +411,6 @@ class WebUiBridge(
     private suspend fun getOfflineMaps(): JSONObject {
         val regions = graph.offlineMapManager.list()
         return JSONObject()
-            .put("days", JSONArray().also { arr -> graph.repository.trackDays().asReversed().forEach { arr.put(it.toString()) } })
             .put(
                 "regions",
                 JSONArray().also { arr ->
@@ -435,17 +430,6 @@ class WebUiBridge(
             .put("download", graph.offlineMapManager.downloadState.value.toJson())
             .put("auto", graph.autoOfflineSync.status.value.toJson())
             .put("log", JSONArray().also { arr -> graph.offlineMapManager.recentLogs().forEach { arr.put(it.toJson()) } })
-    }
-
-    private suspend fun downloadOfflineMap(start: LocalDate, end: LocalDate) {
-        require(!start.isAfter(end)) { "시작일이 종료일보다 늦습니다." }
-        val zone = ZoneId.systemDefault()
-        val points = graph.repository.trackPointsBetween(
-            start.atStartOfDay(zone).toInstant().toEpochMilli(),
-            end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(),
-        )
-        // Returns once the download has started; progress arrives as "offline-changed" events.
-        graph.offlineMapManager.downloadTrackPeriod(points, start, end)
     }
 
     // ---- Backups ----------------------------------------------------------------------

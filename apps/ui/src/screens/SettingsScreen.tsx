@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { bridge } from '../lib/bridge'
 import { usePermissions } from '../lib/hooks'
-import { fmtClock, fmtDuration, parseDayKey, relativeDay } from '../lib/time'
+import { fmtClock, fmtDuration, relativeDay } from '../lib/time'
 import type { AutoSyncStatus, DownloadLogEntry, OfflineDownload, OfflineMaps, Settings, TrackingPreset } from '../lib/types'
 import { Icon, type IconName } from '../ui/Icon'
 import { ActionPill, Button, Card, ConfirmSheet, Divider, GrantBadge, Row, Screen, SectionTitle, Segmented, Switch, cx, fmtBytes } from '../ui/kit'
-import { DayPickerSheet } from './parts'
 
 const PRESETS: { value: TrackingPreset; label: string; desc: string }[] = [
   { value: 'PRECISE', label: '정밀', desc: '이동 경로를 가장 촘촘하게 기록해요. 배터리를 더 써요.' },
@@ -115,33 +114,21 @@ function secondsAgo(t: number, now: number) {
 
 function autoStatusText(auto: AutoSyncStatus, dl: OfflineDownload | undefined) {
   if (!auto.enabled) return '꺼져 있어요'
-  if (dl?.state === 'downloading' && dl.auto) return '지금 받는 중이에요'
+  if (dl?.state === 'downloading') return '지금 받는 중이에요'
   if (!auto.wifi) return '대기 중 · Wi-Fi에 연결되면 받아요'
-  if (dl?.state === 'downloading') return '대기 중 · 직접 저장이 끝나면 이어서 받아요'
   return 'Wi-Fi 연결됨 · 새 경로가 생기면 받아요'
 }
 
 function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p: Partial<Settings>) => void }) {
   const [data, setData] = useState<OfflineMaps | null>(null)
-  const [range, setRange] = useState<{ start: string; end: string } | null>(null)
-  const [picking, setPicking] = useState<'start' | 'end' | null>(null)
   const [deleting, setDeleting] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const lastState = useRef<OfflineDownload['state'] | null>(null)
 
   useEffect(() => {
     let alive = true
-    const load = () => bridge.getOfflineMaps().then((d) => {
-      if (!alive) return
-      setData(d)
-      // Default to the latest recorded day; drop a selection whose day no longer has data.
-      setRange((r) => {
-        const last = d.days[d.days.length - 1]
-        if (!last) return null
-        return r && d.days.includes(r.start) && d.days.includes(r.end) ? r : { start: last, end: last }
-      })
-    })
+    const load = () => bridge.getOfflineMaps().then((d) => alive && setData(d))
     load()
-    const offData = bridge.onDataChanged(() => bridge.getOfflineMaps().then((d) => alive && setData((cur) => (cur ? { ...cur, days: d.days } : d))))
     const offDl = bridge.on('offline-changed', (download) => {
       setData((cur) => (cur ? { ...cur, download } : cur))
       // Reload on every state change so the log shows a run as soon as it starts and once it ends.
@@ -149,32 +136,22 @@ function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p:
       lastState.current = download.state
     })
     const offAuto = bridge.on('offline-auto-changed', (auto) => setData((cur) => (cur ? { ...cur, auto } : cur)))
-    return () => { alive = false; offData(); offDl(); offAuto() }
+    return () => { alive = false; offDl(); offAuto() }
   }, [])
-  const lastState = useRef<OfflineDownload['state'] | null>(null)
 
   const dl = data?.download
   const downloading = dl?.state === 'downloading'
   const pct = dl?.state === 'downloading' && dl.required > 0 ? Math.min(1, dl.completed / dl.required) : null
   const running = data?.log.some((l) => l.result === 'running') ?? false
   const now = useNow(downloading || running)
+  const wifi = data?.auto.wifi ?? false
 
-  const start = async () => {
-    if (!range) return
+  const downloadAll = async () => {
     setError(null)
     try {
-      await bridge.downloadOfflineMap(range)
+      await bridge.downloadAllOfflineMaps()
     } catch (e) {
-      setError(e instanceof Error ? e.message : '저장하지 못했어요.')
-    }
-  }
-
-  const resume = async (id: number) => {
-    setError(null)
-    try {
-      await bridge.resumeOfflineMap({ id })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '저장하지 못했어요.')
+      setError(e instanceof Error ? e.message : '받지 못했어요.')
     }
   }
 
@@ -187,7 +164,6 @@ function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p:
     }
   }
 
-  const days = data?.days ?? []
   const deletingRegion = data?.regions.find((r) => r.id === deleting)
   return (
     <Card>
@@ -200,19 +176,10 @@ function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p:
       <p className="px-5 pb-3 text-[12px] leading-relaxed text-fg3">새로 기록된 경로(점선 구간 포함) 주변 중 아직 없는 지도만 받아요. Wi-Fi가 끊기거나 앱을 벗어나면 바로 멈추고, 다음에 이어서 받아요.</p>
       <Divider />
       <div className="px-5 pt-4">
-        <p className="text-[13px] leading-relaxed text-fg3">선택한 기간에 이동한 경로 주변의 지도를 저장해요. 저장한 지도는 인터넷 없이도 모든 지도 스타일에서 보여요.</p>
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          {(['start', 'end'] as const).map((k) => (
-            <button key={k} disabled={!range} onClick={() => setPicking(k)} className="tap rounded-2xl bg-surface2 px-4 py-3 text-left disabled:opacity-40">
-              <span className="block text-[12px] font-semibold text-fg3">{k === 'start' ? '시작' : '종료'}</span>
-              <span className="num block text-[15px] font-bold">{range?.[k] ?? '-'}</span>
-            </button>
-          ))}
-        </div>
-        <Button disabled={!range || downloading} onClick={start} className="mt-3 flex w-full items-center justify-center gap-2">
-          <Icon name="download" size={18} />{downloading ? '저장 중' : '선택 기간 지도 저장'}
+        <p className="text-[13px] leading-relaxed text-fg3">지금까지 다닌 곳 주변 지도를 한 번에 받아요. 앱을 벗어나도 계속 받고, 모바일 데이터는 쓰지 않아요. 저장한 지도는 인터넷 없이도 모든 지도 스타일에서 보여요.</p>
+        <Button disabled={!wifi || downloading} onClick={downloadAll} className="mt-3 flex w-full items-center justify-center gap-2">
+          <Icon name={wifi ? 'download' : 'wifiOff'} size={18} />{downloading ? '받는 중' : wifi ? '다닌 곳 지도 모두 받기' : 'Wi-Fi에 연결하면 받을 수 있어요'}
         </Button>
-        {data && days.length === 0 && <p className="mt-2 text-[13px] text-fg3">아직 기록된 위치가 없어요.</p>}
         {dl?.state === 'downloading' && (
           <div className="mt-3 space-y-1.5">
             <div className="h-2 overflow-hidden rounded-full bg-surface2">
@@ -235,7 +202,6 @@ function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p:
               <span className="block truncate text-[15px] font-semibold">{r.name}{r.auto && <span className="ml-1.5 rounded-md bg-accentsoft px-1.5 py-0.5 text-[11px] font-bold text-accent">자동</span>}</span>
               <span className="num block text-[13px] text-fg3">{r.completed}/{r.required} · {fmtBytes(r.bytes)}</span>
             </span>
-            {r.completed < r.required && !downloading && !r.auto && <ActionPill onClick={() => resume(r.id)}>이어 받기</ActionPill>}
             <button onClick={() => setDeleting(r.id)} aria-label={`${r.name} 삭제`} className="tap grid size-9 place-items-center rounded-xl text-fg3"><Icon name="trash" size={18} /></button>
           </div>
         </div>
@@ -250,20 +216,10 @@ function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p:
         </>
       )}
 
-      {range && (
-        <DayPickerSheet
-          key={picking ?? 'closed'}
-          open={picking !== null}
-          onClose={() => setPicking(null)}
-          days={picking === 'start' ? days.filter((d) => d <= range.end) : days.filter((d) => d >= range.start)}
-          current={parseDayKey(picking === 'end' ? range.end : range.start)}
-          onPick={(d) => setRange(picking === 'start' ? { start: d, end: range.end } : { start: range.start, end: d })}
-        />
-      )}
       <ConfirmSheet
         open={deleting !== null}
         title="오프라인 지도 삭제"
-        message={`‘${deletingRegion?.name ?? ''}’ 영역을 기기에서 지울까요?`}
+        message={deletingRegion?.auto ? '자동 저장한 지도를 모두 지울까요? 자동 저장이 켜져 있으면 다음에 Wi-Fi에서 다시 받아요.' : `‘${deletingRegion?.name ?? ''}’ 영역을 기기에서 지울까요? 자동 저장 지역과 겹치는 지도는 남아요.`}
         confirmLabel="삭제"
         danger
         onClose={() => setDeleting(null)}
@@ -301,7 +257,7 @@ function LogRow({ entry: l, live, now }: { entry: DownloadLogEntry; live: Extrac
   return (
     <div className="px-5 py-2.5">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold">{l.name}</span>
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold">{l.auto ? '자동 저장' : '모두 받기'}</span>
         <span className={cx('shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold', label.cls)}>{label.text}</span>
       </div>
       <p className="num mt-0.5 text-[12px] text-fg3">

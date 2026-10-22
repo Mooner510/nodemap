@@ -3,7 +3,6 @@ package kr.mooner510.map
 import android.content.Context
 import kr.mooner510.data.NodeMapRepository
 import kr.mooner510.data.PreferencesStore
-import kr.mooner510.data.TrackPoint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,7 +23,6 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
-import java.time.LocalDate
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -54,7 +52,8 @@ data class OfflineRegionInfo(
 )
 
 /**
- * Saves the map around recorded tracks into [TileCache], which the web map reads through the WebView.
+ * Saves the map around every recorded track into one growing region of [TileCache], which the web map reads
+ * through the WebView. Downloads only run on Wi-Fi.
  * Every OpenFreeMap style the app offers shares the same tiles, so a region works in all of them.
  */
 class OfflineMapManager(
@@ -62,6 +61,7 @@ class OfflineMapManager(
     private val preferences: PreferencesStore,
     private val repository: NodeMapRepository,
     private val cache: TileCache,
+    private val wifi: WifiMonitor,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
@@ -78,63 +78,49 @@ class OfflineMapManager(
             deleteLegacyNativeCache()
             cache.closeInterruptedLogs()
         }
+        // Map downloads never continue over mobile data.
+        scope.launch { wifi.wifi.collect { if (!it) stop("Wi-Fi 연결이 끊김") } }
     }
 
     private val busy get() = job?.isActive == true
 
-    suspend fun downloadTrackPeriod(points: List<TrackPoint>, startDay: LocalDate, endDay: LocalDate) = lock.withLock {
-        preemptAuto()
-        check(!busy) { "이미 저장 중입니다." }
-        require(points.isNotEmpty()) { "선택한 기간에 저장된 위치가 없습니다." }
-        val label = if (startDay == endDay) "$startDay 이동 범위" else "$startDay ~ $endDay 이동 범위"
-        _downloadState.value = OfflineDownloadState.Downloading(label, 0, 0, 0)
-        job = launchJob(auto = false) {
-            run(label, auto = false) {
-                val sources = prepareResources()
-                val tiles = sources.flatMapTo(HashSet()) { TileCoverage.tiles(it.key, points, it.minZoom, it.maxZoom) }
-                if (tiles.size > MAX_TILES) {
-                    throw IOException("저장할 지도가 너무 넓어요(타일 ${tiles.size}개). 기간을 줄여 주세요.")
-                }
-                cache.createRegion(label, tiles) to sources
-            }
+    /**
+     * Downloads the map around every recorded track now, without waiting for the auto loop. Returns once the
+     * download has started; it keeps going while the app is in the background but stops if Wi-Fi drops.
+     */
+    suspend fun downloadAll() = lock.withLock {
+        check(wifi.wifi.value) { "Wi-Fi에 연결되어 있을 때만 받을 수 있어요." }
+        // Already fetching the same region: just keep it going when the app leaves the screen.
+        if (busy) {
+            jobIsAuto = false
+            return@withLock
         }
-    }
-
-    /** Fetches what is still missing for a region that was interrupted. */
-    suspend fun resume(id: Long) = lock.withLock {
-        preemptAuto()
-        check(!busy) { "이미 저장 중입니다." }
-        val name = withContext(Dispatchers.IO) { cache.regionName(id) } ?: error("오프라인 지도를 찾을 수 없습니다.")
-        _downloadState.value = OfflineDownloadState.Downloading(name, 0, 0, 0)
-        job = launchJob(auto = false) { run(name, auto = false) { id to prepareResources() } }
+        _downloadState.value = OfflineDownloadState.Downloading(AUTO_REGION_NAME, 0, 0, 0)
+        job = launchJob(auto = false) { run(AUTO_REGION_NAME, auto = false) { planAuto() } }
     }
 
     /**
-     * Adds the tracks recorded since the last run to the auto region and fetches the tiles it is missing.
+     * The auto loop's run: same as [downloadAll] but waits for the result and leaves a running download alone.
      * Returns true once the region is complete, false if it could not run or was stopped.
      */
     suspend fun syncAuto(): Boolean {
         val started = lock.withLock {
-            if (busy) return false
+            if (busy || !wifi.wifi.value) return false
             launchJob(auto = true) { run(AUTO_REGION_NAME, auto = true) { planAuto() } }.also { job = it }
         }
         started.join()
         return _downloadState.value !is OfflineDownloadState.Failed && !started.isCancelled
     }
 
-    /** Cancels a running auto download (a manual one is left alone). */
+    /** Cancels a running auto download; one the user started is left alone. */
     fun stopAuto(reason: String) {
-        if (jobIsAuto && busy) {
-            stopReason = reason
-            job?.cancel()
-        }
+        if (jobIsAuto) stop(reason)
     }
 
-    /** A manual download takes priority; the auto loop picks the region up again later. */
-    private suspend fun preemptAuto() {
-        if (jobIsAuto && busy) {
-            stopReason = "직접 저장을 시작해서 잠시 멈춤"
-            job?.cancelAndJoin()
+    private fun stop(reason: String) {
+        if (busy) {
+            stopReason = reason
+            job?.cancel()
         }
     }
 
@@ -146,7 +132,7 @@ class OfflineMapManager(
 
     private suspend fun planAuto(): Pair<Long, List<Source>> {
         val sources = prepareResources()
-        val (regionId, coveredUntil) = cache.autoRegion() ?: (cache.createRegion(AUTO_REGION_NAME, emptyList(), auto = true) to 0L)
+        val (regionId, coveredUntil) = cache.autoRegion() ?: (cache.createAutoRegion(AUTO_REGION_NAME) to 0L)
         // Inclusive, so the segment from the last covered point to the first new one is part of the corridor.
         val points = repository.trackPointsBetween(coveredUntil, Long.MAX_VALUE)
         if (points.isNotEmpty()) {
@@ -333,7 +319,6 @@ class OfflineMapManager(
 
     companion object {
         const val AUTO_REGION_NAME = "다닌 곳 (자동 저장)"
-        private const val MAX_TILES = 30_000
         private const val MAX_ZOOM = 14
         private const val PARALLEL_DOWNLOADS = 4
         private const val GIVE_UP_AFTER = 24
