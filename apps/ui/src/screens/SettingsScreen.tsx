@@ -305,7 +305,7 @@ function LogRow({ entry: l, live, now }: { entry: DownloadLogEntry; live: Extrac
         <span className={cx('shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold', label.cls)}>{label.text}</span>
       </div>
       <p className="num mt-0.5 text-[12px] text-fg3">
-        {relativeDay(l.startedAt, now)} {fmtClock(l.startedAt)} · {fmtDuration(end - l.startedAt)} · 타일 {l.tiles.toLocaleString()}개 · {fmtBytes(l.bytes)}
+        {relativeDay(l.startedAt, now)} {fmtClock(l.startedAt)} · {end - l.startedAt < 60_000 ? `${Math.max(1, Math.round((end - l.startedAt) / 1000))}초` : fmtDuration(end - l.startedAt)} · 타일 {l.tiles.toLocaleString()}개 · {fmtBytes(l.bytes)}
         {l.remaining > 0 && !isRunning && ` · 남은 ${l.remaining.toLocaleString()}개`}
       </p>
       {isRunning && <Heartbeat lastTileAt={lastTileAt} now={now} />}
