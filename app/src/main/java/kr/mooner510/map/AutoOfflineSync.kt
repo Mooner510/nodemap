@@ -1,9 +1,5 @@
 package kr.mooner510.map
 
-import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,39 +30,25 @@ data class AutoSyncStatus(val enabled: Boolean, val foreground: Boolean, val wif
 
 /**
  * Keeps the auto region ([OfflineMapManager.syncAuto]) up to date, but only while the app is on screen and
- * the default network is a validated Wi-Fi. Losing either condition stops the download at once; the region
+ * on Wi-Fi ([WifiMonitor]). Losing either condition stops the download at once; the region
  * remembers what is missing, so the next run continues where this one stopped.
  */
 class AutoOfflineSync(
-    context: Context,
     preferences: PreferencesStore,
     private val manager: OfflineMapManager,
+    wifiMonitor: WifiMonitor,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val foreground = MutableStateFlow(false)
-    private val wifi = MutableStateFlow(false)
 
     val status: StateFlow<AutoSyncStatus> = combine(
         preferences.settings.map { it.autoOfflineMaps }.distinctUntilChanged(),
         foreground,
-        wifi,
+        wifiMonitor.wifi,
     ) { enabled, fg, wf -> AutoSyncStatus(enabled, fg, wf) }
         .stateIn(scope, SharingStarted.Eagerly, AutoSyncStatus(enabled = false, foreground = false, wifi = false))
 
     init {
-        // The default network is the one HttpURLConnection uses, so "default is Wi-Fi" means tiles go over Wi-Fi.
-        context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
-            object : ConnectivityManager.NetworkCallback() {
-                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                    wifi.value = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                }
-
-                override fun onLost(network: Network) {
-                    wifi.value = false
-                }
-            },
-        )
         scope.launch {
             status.collectLatest { s ->
                 if (!s.ready) {

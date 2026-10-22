@@ -38,10 +38,11 @@ data class DownloadLogEntry(
  * On-device copy of everything the web map loads from OpenFreeMap (styles, TileJSON, sprites, glyphs, tiles).
  *
  * The WebView routes those requests through [intercept], so saved regions — and whatever was viewed while
- * online — keep rendering without a network. Tiles that belong to a saved region are kept until the region is
+ * online — keep rendering without a network. On mobile data only what is on screen and not cached yet is
+ * fetched; refreshing old tiles and styles waits for Wi-Fi. Tiles that belong to a saved region are kept until the region is
  * deleted; other tiles form a size-capped LRU cache.
  */
-class TileCache(context: Context) {
+class TileCache(context: Context, private val wifi: WifiMonitor) {
     private val helper = Helper(context.applicationContext)
     private val db: SQLiteDatabase get() = helper.writableDatabase
     private val background = Executors.newSingleThreadExecutor()
@@ -52,13 +53,14 @@ class TileCache(context: Context) {
         if (method != "GET" || url.scheme != "https" || url.host != HOST) return null
         val raw = url.toString()
         val key = tileKey(raw)
-        return if (key != null) serveTile(raw, key) else serveResource(raw, cacheFirst = isImmutable(url))
+        // On mobile data a cached style/TileJSON is good enough; only Wi-Fi checks for a newer one.
+        return if (key != null) serveTile(raw, key) else serveResource(raw, cacheFirst = isImmutable(url) || !wifi.wifi.value)
     }
 
     private fun serveTile(url: String, key: TileKey): WebResourceResponse {
         val cached = readTile(key)
         if (cached != null) {
-            if (System.currentTimeMillis() - cached.fetchedAt > TILE_REFRESH_MS) {
+            if (System.currentTimeMillis() - cached.fetchedAt > TILE_REFRESH_MS && wifi.wifi.value) {
                 background.execute { runCatching { fetch(url) }.getOrNull()?.let { storeTile(key, it, ambient = true) } }
             }
             return response(cached.mime, cached.data)
@@ -96,27 +98,17 @@ class TileCache(context: Context) {
 
     // ---- Regions ----------------------------------------------------------------------
 
-    fun createRegion(name: String, tiles: Collection<TileKey>, auto: Boolean = false): Long {
-        val db = db
-        db.beginTransaction()
-        try {
-            val id = db.insertOrThrow(
-                "regions",
-                null,
-                ContentValues().apply {
-                    put("name", name)
-                    put("created_at", System.currentTimeMillis())
-                    put("required", tiles.size)
-                    put("auto", if (auto) 1 else 0)
-                },
-            )
-            insertRegionTiles(db, id, tiles)
-            db.setTransactionSuccessful()
-            return id
-        } finally {
-            db.endTransaction()
-        }
-    }
+    /** Creates the empty region that [extendRegion] grows with recorded tracks. */
+    fun createAutoRegion(name: String): Long = db.insertOrThrow(
+        "regions",
+        null,
+        ContentValues().apply {
+            put("name", name)
+            put("created_at", System.currentTimeMillis())
+            put("required", 0)
+            put("auto", 1)
+        },
+    )
 
     /** The region that grows with every recorded track, and the newest track time it already covers. */
     fun autoRegion(): Pair<Long, Long>? =
@@ -128,7 +120,15 @@ class TileCache(context: Context) {
         val db = db
         db.beginTransaction()
         try {
-            insertRegionTiles(db, id, tiles)
+            val stmt = db.compileStatement("INSERT OR IGNORE INTO region_tiles(region_id,source,z,x,y) VALUES(?,?,?,?,?)")
+            tiles.forEach {
+                stmt.bindLong(1, id)
+                stmt.bindString(2, it.source)
+                stmt.bindLong(3, it.z.toLong())
+                stmt.bindLong(4, it.x.toLong())
+                stmt.bindLong(5, it.y.toLong())
+                stmt.executeInsert()
+            }
             db.execSQL(
                 "UPDATE regions SET required=(SELECT COUNT(*) FROM region_tiles WHERE region_id=?),covered_until=? WHERE id=?",
                 arrayOf(id, coveredUntil, id),
@@ -138,21 +138,6 @@ class TileCache(context: Context) {
             db.endTransaction()
         }
     }
-
-    private fun insertRegionTiles(db: SQLiteDatabase, id: Long, tiles: Collection<TileKey>) {
-        val stmt = db.compileStatement("INSERT OR IGNORE INTO region_tiles(region_id,source,z,x,y) VALUES(?,?,?,?,?)")
-        tiles.forEach {
-            stmt.bindLong(1, id)
-            stmt.bindString(2, it.source)
-            stmt.bindLong(3, it.z.toLong())
-            stmt.bindLong(4, it.x.toLong())
-            stmt.bindLong(5, it.y.toLong())
-            stmt.executeInsert()
-        }
-    }
-
-    fun regionName(id: Long): String? =
-        db.rawQuery("SELECT name FROM regions WHERE id=?", arrayOf(id.toString())).use { if (it.moveToFirst()) it.getString(0) else null }
 
     /** Tiles of the region that are not in the cache yet. */
     fun missingTiles(regionId: Long): List<TileKey> = db.rawQuery(

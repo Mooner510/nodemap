@@ -170,8 +170,6 @@ export interface DownloadLogEntry {
 }
 
 export interface OfflineMaps {
-  /** Local dates (YYYY-MM-DD) with recorded track points, ascending. */
-  days: string[]
   regions: OfflineRegion[]
   download: OfflineDownload
   auto: AutoSyncStatus
@@ -213,9 +211,8 @@ export interface Bridge {
   requestPermission(input: { kind: PermissionKind }): Promise<Permissions>
 
   getOfflineMaps(): Promise<OfflineMaps>
-  downloadOfflineMap(input: { start: string; end: string }): Promise<void>
-  /** Fetches the tiles an interrupted region is still missing. */
-  resumeOfflineMap(input: { id: number }): Promise<void>
+  /** Downloads the map around every recorded track now. Wi-Fi only; rejects otherwise. */
+  downloadAllOfflineMaps(): Promise<void>
   deleteOfflineMap(input: { id: number }): Promise<void>
 
   /** Opens the system "save as" picker; `cancelled` when the user backs out of it. */

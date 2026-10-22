@@ -246,7 +246,6 @@ export function createMockBridge(): Bridge {
       return delay({ ...permissions }, 300)
     },
     getOfflineMaps: () => delay({
-      days: days.map(dayKey),
       regions: offlineRegions.map((r) => ({ ...r })),
       download: { state: 'idle' } as OfflineDownload,
       auto: { enabled: settings.autoOfflineMaps, foreground: true, wifi: true },
@@ -255,28 +254,17 @@ export function createMockBridge(): Bridge {
         { id: 1, name: '다닌 곳 (자동 저장)', auto: true, startedAt: Date.now() - 86_400_000, updatedAt: Date.now() - 86_100_000, lastTileAt: Date.now() - 86_100_000, endedAt: Date.now() - 86_100_000, tiles: 120, bytes: 3 * 1024 * 1024, remaining: 290, result: 'stopped', message: 'Wi-Fi 연결이 끊김' },
       ] as DownloadLogEntry[],
     }),
-    async downloadOfflineMap({ start, end }) {
-      const name = start === end ? `${start} 이동 범위` : `${start} ~ ${end} 이동 범위`
-      const required = 1200
+    async downloadAllOfflineMaps() {
+      const region = offlineRegions.find((r) => r.auto)
+      if (!region) return
+      const required = region.required + 600
       ;(async () => {
-        for (let done = 0; done <= required; done += 150) {
-          emit('offline-changed', { state: 'downloading', name, completed: done, required, bytes: done * 24_000 })
+        for (let done = region.completed; done <= required; done += 50) {
+          emit('offline-changed', { state: 'downloading', name: region.name, completed: done, required, bytes: done * 24_000, auto: false, lastTileAt: Date.now() })
           await delay(undefined, 250)
         }
-        offlineRegions = [...offlineRegions, { id: Date.now(), name, completed: required, required, bytes: required * 24_000 }]
-        emit('offline-changed', { state: 'complete', name, bytes: required * 24_000 })
-      })()
-    },
-    async resumeOfflineMap({ id }) {
-      const region = offlineRegions.find((r) => r.id === id)
-      if (!region) throw new Error('오프라인 지도를 찾을 수 없습니다.')
-      ;(async () => {
-        for (let done = region.completed; done <= region.required; done += 150) {
-          emit('offline-changed', { state: 'downloading', name: region.name, completed: done, required: region.required, bytes: done * 24_000 })
-          await delay(undefined, 250)
-        }
-        offlineRegions = offlineRegions.map((r) => (r.id === id ? { ...r, completed: r.required, bytes: r.required * 24_000 } : r))
-        emit('offline-changed', { state: 'complete', name: region.name, bytes: region.required * 24_000 })
+        offlineRegions = offlineRegions.map((r) => (r.id === region.id ? { ...r, completed: required, required, bytes: required * 24_000 } : r))
+        emit('offline-changed', { state: 'complete', name: region.name, bytes: required * 24_000 })
       })()
     },
     async deleteOfflineMap({ id }) {
