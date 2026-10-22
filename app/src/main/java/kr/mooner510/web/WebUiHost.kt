@@ -125,7 +125,8 @@ fun WebUiHost(modifier: Modifier = Modifier) {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
             .build()
 
-        val tileCache = context.appGraph.tileCache
+        val graph = context.appGraph
+        val tileCache = graph.tileCache
 
         webView.webViewClient = object : WebViewClient() {
             // Map styles/tiles go through the on-device cache so saved regions render offline.
@@ -177,6 +178,9 @@ fun WebUiHost(modifier: Modifier = Modifier) {
 
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
+                // Auto map downloads only run while the app is on screen.
+                Lifecycle.Event.ON_START -> graph.autoOfflineSync.setForeground(true)
+                Lifecycle.Event.ON_STOP -> graph.autoOfflineSync.setForeground(false)
                 Lifecycle.Event.ON_RESUME -> {
                     webView.onResume()
                     // Permissions may have been granted in system settings meanwhile.
@@ -189,6 +193,7 @@ fun WebUiHost(modifier: Modifier = Modifier) {
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
+            graph.autoOfflineSync.setForeground(false)
             webView.removeJavascriptInterface("NodeMapHost")
             webView.stopLoading()
             webView.destroy()
@@ -220,6 +225,9 @@ fun WebUiHost(modifier: Modifier = Modifier) {
             .launchIn(this)
         graph.offlineMapManager.downloadState
             .onEach { webView.emit("offline-changed", it.toJson().toString()) }
+            .launchIn(this)
+        graph.autoOfflineSync.status
+            .onEach { webView.emit("offline-auto-changed", it.toJson().toString()) }
             .launchIn(this)
     }
 

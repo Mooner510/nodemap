@@ -35,6 +35,8 @@ import kr.mooner510.data.SYSTEM_TYPE_GENERAL
 import kr.mooner510.data.TimelineEvent
 import kr.mooner510.data.TrackPoint
 import kr.mooner510.data.TrackingPreset
+import kr.mooner510.map.AutoSyncStatus
+import kr.mooner510.map.DownloadLogEntry
 import kr.mooner510.map.OfflineDownloadState
 import kr.mooner510.tracking.TrackingService
 import org.json.JSONArray
@@ -202,6 +204,7 @@ class WebUiBridge(
         }
         if (patch.has("reverseGeocodingEnabled")) prefs.setReverseGeocodingEnabled(patch.getBoolean("reverseGeocodingEnabled"))
         if (patch.has("autoStartAfterBoot")) prefs.setAutoStartAfterBoot(patch.getBoolean("autoStartAfterBoot"))
+        if (patch.has("autoOfflineMaps")) prefs.setAutoOfflineMaps(patch.getBoolean("autoOfflineMaps"))
         if (patch.has("biometricLockEnabled")) {
             val enabled = patch.getBoolean("biometricLockEnabled")
             if (enabled && !BiometricLock.isAvailable(context)) {
@@ -423,12 +426,15 @@ class WebUiBridge(
                                 .put("name", it.name)
                                 .put("completed", it.completedResources)
                                 .put("required", it.requiredResources)
-                                .put("bytes", it.completedBytes),
+                                .put("bytes", it.completedBytes)
+                                .put("auto", it.auto),
                         )
                     }
                 },
             )
             .put("download", graph.offlineMapManager.downloadState.value.toJson())
+            .put("auto", graph.autoOfflineSync.status.value.toJson())
+            .put("log", JSONArray().also { arr -> graph.offlineMapManager.recentLogs().forEach { arr.put(it.toJson()) } })
     }
 
     private suspend fun downloadOfflineMap(start: LocalDate, end: LocalDate) {
@@ -543,14 +549,35 @@ internal fun AppSettings.toJson() = JSONObject()
     .put("detailWindowMinutes", detailWindowMinutes)
     .put("totalWindowMinutes", totalWindowMinutes)
     .put("cameraWindowMinutes", cameraWindowMinutes)
+    .put("autoOfflineMaps", autoOfflineMaps)
 
 internal fun OfflineDownloadState.toJson(): JSONObject = when (this) {
     OfflineDownloadState.Idle -> JSONObject().put("state", "idle")
     is OfflineDownloadState.Downloading -> JSONObject()
         .put("state", "downloading").put("name", name).put("completed", completed).put("required", required).put("bytes", bytes)
+        .put("auto", auto).put("lastTileAt", lastTileAt.takeIf { it > 0 } ?: JSONObject.NULL)
     is OfflineDownloadState.Complete -> JSONObject().put("state", "complete").put("name", name).put("bytes", bytes)
     is OfflineDownloadState.Failed -> JSONObject().put("state", "failed").put("message", message)
 }
+
+internal fun AutoSyncStatus.toJson(): JSONObject = JSONObject()
+    .put("enabled", enabled)
+    .put("foreground", foreground)
+    .put("wifi", wifi)
+
+private fun DownloadLogEntry.toJson() = JSONObject()
+    .put("id", id)
+    .put("name", name)
+    .put("auto", auto)
+    .put("startedAt", startedAt)
+    .put("updatedAt", updatedAt)
+    .put("lastTileAt", lastTileAt ?: JSONObject.NULL)
+    .put("endedAt", endedAt ?: JSONObject.NULL)
+    .put("tiles", tiles)
+    .put("bytes", bytes)
+    .put("remaining", remaining)
+    .put("result", result)
+    .put("message", message ?: JSONObject.NULL)
 
 private fun RemoteBackupMetadata.toJson() = JSONObject()
     .put("id", id)

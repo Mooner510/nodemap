@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { bridge } from '../lib/bridge'
 import { usePermissions } from '../lib/hooks'
-import { parseDayKey } from '../lib/time'
-import type { OfflineMaps, Settings, TrackingPreset } from '../lib/types'
+import { fmtClock, fmtDuration, parseDayKey, relativeDay } from '../lib/time'
+import type { AutoSyncStatus, DownloadLogEntry, OfflineDownload, OfflineMaps, Settings, TrackingPreset } from '../lib/types'
 import { Icon, type IconName } from '../ui/Icon'
 import { ActionPill, Button, Card, ConfirmSheet, Divider, GrantBadge, Row, Screen, SectionTitle, Segmented, Switch, cx, fmtBytes } from '../ui/kit'
 import { DayPickerSheet } from './parts'
@@ -72,7 +72,7 @@ export function SettingsScreen({ settings, update }: { settings: Settings; updat
       <p className="px-5 pt-2 text-[12px] leading-relaxed text-fg3">허용하지 않은 권한에 해당하는 기능만 꺼져요.</p>
 
       <SectionTitle>오프라인 지도</SectionTitle>
-      <OfflineMapsCard />
+      <OfflineMapsCard settings={settings} update={update} />
 
       <SectionTitle>타임라인 표시</SectionTitle>
       <Card>
@@ -95,7 +95,33 @@ function PermissionRow({ icon, title, desc, granted, onClick }: { icon: IconName
   return <Row icon={icon} title={title} desc={desc} trailing={granted ? <GrantBadge /> : <ActionPill onClick={onClick}>허용</ActionPill>} />
 }
 
-function OfflineMapsCard() {
+/** A tile arriving less than this long ago means the download is really moving. */
+const STALL_MS = 20_000
+
+function useNow(active: boolean) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [active])
+  return now
+}
+
+function secondsAgo(t: number, now: number) {
+  const s = Math.max(0, Math.round((now - t) / 1000))
+  return s < 60 ? `${s}초 전` : `${Math.floor(s / 60)}분 ${s % 60}초 전`
+}
+
+function autoStatusText(auto: AutoSyncStatus, dl: OfflineDownload | undefined) {
+  if (!auto.enabled) return '꺼져 있어요'
+  if (dl?.state === 'downloading' && dl.auto) return '지금 받는 중이에요'
+  if (!auto.wifi) return '대기 중 · Wi-Fi에 연결되면 받아요'
+  if (dl?.state === 'downloading') return '대기 중 · 직접 저장이 끝나면 이어서 받아요'
+  return 'Wi-Fi 연결됨 · 새 경로가 생기면 받아요'
+}
+
+function OfflineMapsCard({ settings, update }: { settings: Settings; update: (p: Partial<Settings>) => void }) {
   const [data, setData] = useState<OfflineMaps | null>(null)
   const [range, setRange] = useState<{ start: string; end: string } | null>(null)
   const [picking, setPicking] = useState<'start' | 'end' | null>(null)
@@ -118,14 +144,20 @@ function OfflineMapsCard() {
     const offData = bridge.onDataChanged(() => bridge.getOfflineMaps().then((d) => alive && setData((cur) => (cur ? { ...cur, days: d.days } : d))))
     const offDl = bridge.on('offline-changed', (download) => {
       setData((cur) => (cur ? { ...cur, download } : cur))
-      if (download.state === 'complete' || download.state === 'failed') load()
+      // Reload on every state change so the log shows a run as soon as it starts and once it ends.
+      if (download.state !== lastState.current) load()
+      lastState.current = download.state
     })
-    return () => { alive = false; offData(); offDl() }
+    const offAuto = bridge.on('offline-auto-changed', (auto) => setData((cur) => (cur ? { ...cur, auto } : cur)))
+    return () => { alive = false; offData(); offDl(); offAuto() }
   }, [])
+  const lastState = useRef<OfflineDownload['state'] | null>(null)
 
   const dl = data?.download
   const downloading = dl?.state === 'downloading'
   const pct = dl?.state === 'downloading' && dl.required > 0 ? Math.min(1, dl.completed / dl.required) : null
+  const running = data?.log.some((l) => l.result === 'running') ?? false
+  const now = useNow(downloading || running)
 
   const start = async () => {
     if (!range) return
@@ -159,6 +191,14 @@ function OfflineMapsCard() {
   const deletingRegion = data?.regions.find((r) => r.id === deleting)
   return (
     <Card>
+      <Row
+        icon="route"
+        title="다닌 곳 자동 저장"
+        desc={data ? autoStatusText(data.auto, dl) : 'Wi-Fi에 연결된 채 앱을 보고 있을 때만 받아요'}
+        trailing={<Switch label="다닌 곳 자동 저장" checked={settings.autoOfflineMaps} onChange={(v) => update({ autoOfflineMaps: v })} />}
+      />
+      <p className="px-5 pb-3 text-[12px] leading-relaxed text-fg3">새로 기록된 경로(점선 구간 포함) 주변 중 아직 없는 지도만 받아요. Wi-Fi가 끊기거나 앱을 벗어나면 바로 멈추고, 다음에 이어서 받아요.</p>
+      <Divider />
       <div className="px-5 pt-4">
         <p className="text-[13px] leading-relaxed text-fg3">선택한 기간에 이동한 경로 주변의 지도를 저장해요. 저장한 지도는 인터넷 없이도 모든 지도 스타일에서 보여요.</p>
         <div className="mt-3 grid grid-cols-2 gap-2">
@@ -179,6 +219,7 @@ function OfflineMapsCard() {
               <div className={cx('h-full rounded-full bg-accent', pct === null && 'w-1/3 animate-pulse')} style={pct === null ? undefined : { width: `${pct * 100}%` }} />
             </div>
             <p className="text-[13px] text-fg2">{dl.name}{pct !== null && ` · ${Math.round(pct * 100)}%`}{dl.bytes > 0 && ` · ${fmtBytes(dl.bytes)}`}</p>
+            <Heartbeat lastTileAt={dl.lastTileAt ?? null} now={now} />
           </div>
         )}
         {dl?.state === 'complete' && <p className="mt-2 text-[13px] font-semibold text-accent">{dl.name} 저장 완료 · {fmtBytes(dl.bytes)}</p>}
@@ -191,14 +232,23 @@ function OfflineMapsCard() {
           <Divider />
           <div className="flex items-center gap-3 px-5 py-3">
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[15px] font-semibold">{r.name}</span>
+              <span className="block truncate text-[15px] font-semibold">{r.name}{r.auto && <span className="ml-1.5 rounded-md bg-accentsoft px-1.5 py-0.5 text-[11px] font-bold text-accent">자동</span>}</span>
               <span className="num block text-[13px] text-fg3">{r.completed}/{r.required} · {fmtBytes(r.bytes)}</span>
             </span>
-            {r.completed < r.required && !downloading && <ActionPill onClick={() => resume(r.id)}>이어 받기</ActionPill>}
+            {r.completed < r.required && !downloading && !r.auto && <ActionPill onClick={() => resume(r.id)}>이어 받기</ActionPill>}
             <button onClick={() => setDeleting(r.id)} aria-label={`${r.name} 삭제`} className="tap grid size-9 place-items-center rounded-xl text-fg3"><Icon name="trash" size={18} /></button>
           </div>
         </div>
       ))}
+
+      {data && data.log.length > 0 && (
+        <>
+          <Divider />
+          <div className="px-5 pt-4 pb-1 text-[13px] font-bold text-fg3">다운로드 기록</div>
+          {data.log.map((l) => <LogRow key={l.id} entry={l} live={dl?.state === 'downloading' ? dl : null} now={now} />)}
+          <div className="pb-2" />
+        </>
+      )}
 
       {range && (
         <DayPickerSheet
@@ -220,6 +270,47 @@ function OfflineMapsCard() {
         onConfirm={() => deleting !== null && remove(deleting)}
       />
     </Card>
+  )
+}
+
+/** "마지막 수신 n초 전": proof that tiles are actually arriving, not just a spinner. */
+function Heartbeat({ lastTileAt, now }: { lastTileAt: number | null; now: number }) {
+  if (lastTileAt === null) return <p className="text-[12px] text-fg3">서버에 연결하는 중…</p>
+  const stalled = now - lastTileAt > STALL_MS
+  return (
+    <p className={cx('num flex items-center gap-1.5 text-[12px] font-semibold', stalled ? 'text-warn' : 'text-ok')}>
+      <span className={cx('size-2 rounded-full', stalled ? 'bg-warn' : 'animate-pulse bg-ok')} />
+      마지막 수신 {secondsAgo(lastTileAt, now)}{stalled && ' · 응답이 늦어요'}
+    </p>
+  )
+}
+
+const RESULT_LABEL: Record<DownloadLogEntry['result'], { text: string; cls: string }> = {
+  running: { text: '진행 중', cls: 'bg-ok/12 text-ok' },
+  complete: { text: '완료', cls: 'bg-surface2 text-fg2' },
+  stopped: { text: '중단', cls: 'bg-warn/12 text-warn' },
+  failed: { text: '실패', cls: 'bg-danger/12 text-danger' },
+}
+
+function LogRow({ entry: l, live, now }: { entry: DownloadLogEntry; live: Extract<OfflineDownload, { state: 'downloading' }> | null; now: number }) {
+  const label = RESULT_LABEL[l.result]
+  const isRunning = l.result === 'running'
+  // The row is written every ~2 s; the live progress event is fresher while this run is the active one.
+  const lastTileAt = isRunning && live?.name === l.name ? (live.lastTileAt ?? null) : l.lastTileAt
+  const end = l.endedAt ?? now
+  return (
+    <div className="px-5 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold">{l.name}</span>
+        <span className={cx('shrink-0 rounded-md px-2 py-0.5 text-[11px] font-bold', label.cls)}>{label.text}</span>
+      </div>
+      <p className="num mt-0.5 text-[12px] text-fg3">
+        {relativeDay(l.startedAt, now)} {fmtClock(l.startedAt)} · {fmtDuration(end - l.startedAt)} · 타일 {l.tiles.toLocaleString()}개 · {fmtBytes(l.bytes)}
+        {l.remaining > 0 && !isRunning && ` · 남은 ${l.remaining.toLocaleString()}개`}
+      </p>
+      {isRunning && <Heartbeat lastTileAt={lastTileAt} now={now} />}
+      {l.message && <p className="text-[12px] text-fg3">{l.message}</p>}
+    </div>
   )
 }
 

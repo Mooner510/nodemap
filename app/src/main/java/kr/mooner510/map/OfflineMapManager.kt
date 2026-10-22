@@ -1,6 +1,7 @@
 package kr.mooner510.map
 
 import android.content.Context
+import kr.mooner510.data.NodeMapRepository
 import kr.mooner510.data.PreferencesStore
 import kr.mooner510.data.TrackPoint
 import kotlinx.coroutines.CancellationException
@@ -35,6 +36,9 @@ sealed interface OfflineDownloadState {
         val completed: Long,
         val required: Long,
         val bytes: Long,
+        val auto: Boolean = false,
+        /** When the latest tile arrived (0 = none yet), so the UI can tell a live download from a stuck one. */
+        val lastTileAt: Long = 0,
     ) : OfflineDownloadState
     data class Complete(val name: String, val bytes: Long) : OfflineDownloadState
     data class Failed(val message: String) : OfflineDownloadState
@@ -46,6 +50,7 @@ data class OfflineRegionInfo(
     val completedResources: Long,
     val requiredResources: Long,
     val completedBytes: Long,
+    val auto: Boolean = false,
 )
 
 /**
@@ -55,28 +60,36 @@ data class OfflineRegionInfo(
 class OfflineMapManager(
     private val context: Context,
     private val preferences: PreferencesStore,
+    private val repository: NodeMapRepository,
     private val cache: TileCache,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
     private var job: Job? = null
+    @Volatile private var jobIsAuto = false
+    /** Why the running job is being cancelled; written to the download log. */
+    @Volatile private var stopReason: String? = null
     @Volatile private var activeRegion: Long? = null
     private val _downloadState = MutableStateFlow<OfflineDownloadState>(OfflineDownloadState.Idle)
     val downloadState = _downloadState.asStateFlow()
 
     init {
-        scope.launch { deleteLegacyNativeCache() }
+        scope.launch {
+            deleteLegacyNativeCache()
+            cache.closeInterruptedLogs()
+        }
     }
 
     private val busy get() = job?.isActive == true
 
     suspend fun downloadTrackPeriod(points: List<TrackPoint>, startDay: LocalDate, endDay: LocalDate) = lock.withLock {
+        preemptAuto()
         check(!busy) { "이미 저장 중입니다." }
         require(points.isNotEmpty()) { "선택한 기간에 저장된 위치가 없습니다." }
         val label = if (startDay == endDay) "$startDay 이동 범위" else "$startDay ~ $endDay 이동 범위"
         _downloadState.value = OfflineDownloadState.Downloading(label, 0, 0, 0)
-        job = scope.launch {
-            run(label) {
+        job = launchJob(auto = false) {
+            run(label, auto = false) {
                 val sources = prepareResources()
                 val tiles = sources.flatMapTo(HashSet()) { TileCoverage.tiles(it.key, points, it.minZoom, it.maxZoom) }
                 if (tiles.size > MAX_TILES) {
@@ -89,27 +102,78 @@ class OfflineMapManager(
 
     /** Fetches what is still missing for a region that was interrupted. */
     suspend fun resume(id: Long) = lock.withLock {
+        preemptAuto()
         check(!busy) { "이미 저장 중입니다." }
         val name = withContext(Dispatchers.IO) { cache.regionName(id) } ?: error("오프라인 지도를 찾을 수 없습니다.")
         _downloadState.value = OfflineDownloadState.Downloading(name, 0, 0, 0)
-        job = scope.launch { run(name) { id to prepareResources() } }
+        job = launchJob(auto = false) { run(name, auto = false) { id to prepareResources() } }
+    }
+
+    /**
+     * Adds the tracks recorded since the last run to the auto region and fetches the tiles it is missing.
+     * Returns true once the region is complete, false if it could not run or was stopped.
+     */
+    suspend fun syncAuto(): Boolean {
+        val started = lock.withLock {
+            if (busy) return false
+            launchJob(auto = true) { run(AUTO_REGION_NAME, auto = true) { planAuto() } }.also { job = it }
+        }
+        started.join()
+        return _downloadState.value !is OfflineDownloadState.Failed && !started.isCancelled
+    }
+
+    /** Cancels a running auto download (a manual one is left alone). */
+    fun stopAuto(reason: String) {
+        if (jobIsAuto && busy) {
+            stopReason = reason
+            job?.cancel()
+        }
+    }
+
+    /** A manual download takes priority; the auto loop picks the region up again later. */
+    private suspend fun preemptAuto() {
+        if (jobIsAuto && busy) {
+            stopReason = "직접 저장을 시작해서 잠시 멈춤"
+            job?.cancelAndJoin()
+        }
+    }
+
+    private fun launchJob(auto: Boolean, block: suspend () -> Unit): Job {
+        jobIsAuto = auto
+        stopReason = null
+        return scope.launch { block() }
+    }
+
+    private suspend fun planAuto(): Pair<Long, List<Source>> {
+        val sources = prepareResources()
+        val (regionId, coveredUntil) = cache.autoRegion() ?: (cache.createRegion(AUTO_REGION_NAME, emptyList(), auto = true) to 0L)
+        // Inclusive, so the segment from the last covered point to the first new one is part of the corridor.
+        val points = repository.trackPointsBetween(coveredUntil, Long.MAX_VALUE)
+        if (points.isNotEmpty()) {
+            val tiles = sources.flatMapTo(HashSet()) { TileCoverage.tiles(it.key, points, it.minZoom, it.maxZoom) }
+            cache.extendRegion(regionId, tiles, points.last().timestamp)
+        }
+        return regionId to sources
     }
 
     suspend fun list(): List<OfflineRegionInfo> = withContext(Dispatchers.IO) { cache.regions() }
 
+    suspend fun recentLogs(limit: Int = 10): List<DownloadLogEntry> = withContext(Dispatchers.IO) { cache.recentLogs(limit) }
+
     suspend fun delete(id: Long): Boolean = lock.withLock {
         if (activeRegion == id) {
+            stopReason = "지역을 삭제함"
             job?.cancelAndJoin()
             _downloadState.value = OfflineDownloadState.Idle
         }
         withContext(Dispatchers.IO) { cache.deleteRegion(id) }
     }
 
-    private suspend fun run(name: String, plan: suspend () -> Pair<Long, List<Source>>) {
+    private suspend fun run(name: String, auto: Boolean, plan: suspend () -> Pair<Long, List<Source>>) {
         val result = runCatching {
             val (regionId, sources) = plan()
             activeRegion = regionId
-            downloadRegion(name, regionId, sources)
+            downloadRegion(name, regionId, sources, auto)
         }
         activeRegion = null
         _downloadState.value = result.getOrElse {
@@ -118,46 +182,70 @@ class OfflineMapManager(
         }
     }
 
-    private suspend fun downloadRegion(name: String, regionId: Long, sources: List<Source>): OfflineDownloadState {
+    private suspend fun downloadRegion(name: String, regionId: Long, sources: List<Source>, auto: Boolean): OfflineDownloadState {
         val templates = sources.associate { it.key to it.template }
         val missing = cache.missingTiles(regionId)
         val info = cache.regions().first { it.id == regionId }
+        // Nothing new for the auto region is the normal case; don't announce it.
+        if (missing.isEmpty()) return if (auto) OfflineDownloadState.Idle else OfflineDownloadState.Complete(name, info.completedBytes)
         val total = info.requiredResources
         val done = AtomicLong(total - missing.size)
         val bytes = AtomicLong(info.completedBytes)
+        val lastTileAt = AtomicLong()
         val consecutiveFailures = AtomicInteger()
         val queue = ConcurrentLinkedQueue(missing)
 
-        coroutineScope {
-            val progress = launch {
-                while (isActive) {
-                    _downloadState.value = OfflineDownloadState.Downloading(name, done.get(), total, bytes.get())
-                    delay(PROGRESS_INTERVAL_MS)
-                }
-            }
-            List(PARALLEL_DOWNLOADS) {
-                launch {
-                    while (isActive && consecutiveFailures.get() < GIVE_UP_AFTER) {
-                        val tile = queue.poll() ?: break
-                        val size = templates[tile.source]?.let { template -> retry { cache.downloadTile(template, tile) } }
-                        if (size == null) {
-                            consecutiveFailures.incrementAndGet()
-                        } else {
-                            consecutiveFailures.set(0)
-                            done.incrementAndGet()
-                            bytes.addAndGet(size.toLong())
-                        }
-                    }
-                }
-            }.forEach { it.join() }
-            progress.cancel()
+        val logId = cache.startLog(name, auto, missing.size)
+        val startDone = done.get()
+        val startBytes = bytes.get()
+        fun finishLog(result: String, message: String?) = runCatching {
+            cache.finishLog(logId, result, message, done.get() - startDone, bytes.get() - startBytes, total - done.get(), lastTileAt.get())
         }
 
-        val remaining = total - done.get()
-        if (consecutiveFailures.get() >= GIVE_UP_AFTER) {
-            throw IOException("지도 서버에 연결할 수 없어 멈췄어요. 남은 ${remaining}개는 이어 받기로 받을 수 있어요.")
+        try {
+            coroutineScope {
+                val progress = launch {
+                    var ticks = 0
+                    while (isActive) {
+                        _downloadState.value = OfflineDownloadState.Downloading(name, done.get(), total, bytes.get(), auto, lastTileAt.get())
+                        if (ticks++ % LOG_EVERY_TICKS == 0) {
+                            runCatching { cache.updateLog(logId, done.get() - startDone, bytes.get() - startBytes, total - done.get(), lastTileAt.get()) }
+                        }
+                        delay(PROGRESS_INTERVAL_MS)
+                    }
+                }
+                List(PARALLEL_DOWNLOADS) {
+                    launch {
+                        while (isActive && consecutiveFailures.get() < GIVE_UP_AFTER) {
+                            val tile = queue.poll() ?: break
+                            val size = templates[tile.source]?.let { template -> retry { cache.downloadTile(template, tile) } }
+                            if (size == null) {
+                                consecutiveFailures.incrementAndGet()
+                            } else {
+                                consecutiveFailures.set(0)
+                                done.incrementAndGet()
+                                bytes.addAndGet(size.toLong())
+                                lastTileAt.set(System.currentTimeMillis())
+                            }
+                        }
+                    }
+                }.forEach { it.join() }
+                progress.cancel()
+            }
+
+            val remaining = total - done.get()
+            if (consecutiveFailures.get() >= GIVE_UP_AFTER) {
+                throw IOException("지도 서버에 연결할 수 없어 멈췄어요. 남은 ${remaining}개는 이어 받기로 받을 수 있어요.")
+            }
+            if (remaining > 0) throw IOException("타일 ${remaining}개를 받지 못했어요. 이어 받기로 다시 시도할 수 있어요.")
+        } catch (e: CancellationException) {
+            finishLog(TileCache.LOG_STOPPED, stopReason ?: "중단됨")
+            throw e
+        } catch (e: Exception) {
+            finishLog(TileCache.LOG_FAILED, e.message)
+            throw e
         }
-        if (remaining > 0) throw IOException("타일 ${remaining}개를 받지 못했어요. 이어 받기로 다시 시도할 수 있어요.")
+        finishLog(TileCache.LOG_COMPLETE, null)
         return OfflineDownloadState.Complete(name, bytes.get())
     }
 
@@ -243,13 +331,16 @@ class OfflineMapManager(
         }
     }
 
-    private companion object {
-        const val MAX_TILES = 30_000
-        const val MAX_ZOOM = 14
-        const val PARALLEL_DOWNLOADS = 4
-        const val GIVE_UP_AFTER = 24
-        const val PROGRESS_INTERVAL_MS = 250L
-        val STYLE_URIS = listOf("liberty", "bright", "positron", "dark").map { "https://${TileCache.HOST}/styles/$it" }
-        val GLYPH_RANGES = listOf("0-255", "256-511", "8192-8447")
+    companion object {
+        const val AUTO_REGION_NAME = "다닌 곳 (자동 저장)"
+        private const val MAX_TILES = 30_000
+        private const val MAX_ZOOM = 14
+        private const val PARALLEL_DOWNLOADS = 4
+        private const val GIVE_UP_AFTER = 24
+        private const val PROGRESS_INTERVAL_MS = 250L
+        /** Write the log heartbeat every 2 s rather than on every progress tick. */
+        private const val LOG_EVERY_TICKS = 8
+        private val STYLE_URIS = listOf("liberty", "bright", "positron", "dark").map { "https://${TileCache.HOST}/styles/$it" }
+        private val GLYPH_RANGES = listOf("0-255", "256-511", "8192-8447")
     }
 }

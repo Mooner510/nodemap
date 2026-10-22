@@ -1,4 +1,4 @@
-import type { Bridge, BridgeEvents, CloudBackupMetadata, EditablePinType, OfflineDownload, OfflineRegion, Permissions, Pin, PinRule, PinType, Settings, TimelineData, TrackPoint } from './types'
+import type { Bridge, BridgeEvents, CloudBackupMetadata, DownloadLogEntry, EditablePinType, OfflineDownload, OfflineRegion, Permissions, Pin, PinRule, PinType, Settings, TimelineData, TrackPoint } from './types'
 import { DAY, HOUR, MINUTE, dayKey, startOfDay } from './time'
 
 const PIN_TYPES: PinType[] = [
@@ -22,6 +22,7 @@ let settings: Settings = {
   detailWindowMinutes: 120,
   totalWindowMinutes: 720,
   cameraWindowMinutes: 30,
+  autoOfflineMaps: true,
 }
 
 const base = { titleOverride: '', bodyTemplate: '', appMode: 'INCLUDE_SELECTED', packages: [], join: 'ALL', conditions: [], hidden: false } as const
@@ -46,6 +47,7 @@ const APPS = [
 
 let permissions: Permissions = { location: true, backgroundLocation: false, sensitive: true, notificationAccess: false }
 let offlineRegions: OfflineRegion[] = [
+  { id: 3, name: '다닌 곳 (자동 저장)', completed: 2310, required: 2310, bytes: 58 * 1024 * 1024, auto: true },
   { id: 1, name: '최근 이동 범위', completed: 1840, required: 1840, bytes: 46 * 1024 * 1024 },
   { id: 2, name: '중단된 이동 범위', completed: 620, required: 2100, bytes: 15 * 1024 * 1024 },
 ]
@@ -243,7 +245,16 @@ export function createMockBridge(): Bridge {
       if (kind in permissions) permissions = { ...permissions, [kind]: true }
       return delay({ ...permissions }, 300)
     },
-    getOfflineMaps: () => delay({ days: days.map(dayKey), regions: offlineRegions.map((r) => ({ ...r })), download: { state: 'idle' } as OfflineDownload }),
+    getOfflineMaps: () => delay({
+      days: days.map(dayKey),
+      regions: offlineRegions.map((r) => ({ ...r })),
+      download: { state: 'idle' } as OfflineDownload,
+      auto: { enabled: settings.autoOfflineMaps, foreground: true, wifi: true },
+      log: [
+        { id: 2, name: '다닌 곳 (자동 저장)', auto: true, startedAt: Date.now() - 3_600_000, updatedAt: Date.now() - 3_480_000, lastTileAt: Date.now() - 3_480_000, endedAt: Date.now() - 3_480_000, tiles: 412, bytes: 9 * 1024 * 1024, remaining: 0, result: 'complete', message: null },
+        { id: 1, name: '다닌 곳 (자동 저장)', auto: true, startedAt: Date.now() - 86_400_000, updatedAt: Date.now() - 86_100_000, lastTileAt: Date.now() - 86_100_000, endedAt: Date.now() - 86_100_000, tiles: 120, bytes: 3 * 1024 * 1024, remaining: 290, result: 'stopped', message: 'Wi-Fi 연결이 끊김' },
+      ] as DownloadLogEntry[],
+    }),
     async downloadOfflineMap({ start, end }) {
       const name = start === end ? `${start} 이동 범위` : `${start} ~ ${end} 이동 범위`
       const required = 1200

@@ -18,6 +18,22 @@ import java.util.concurrent.atomic.AtomicInteger
 /** A vector/raster tile, addressed independently of the server's dataset version. */
 data class TileKey(val source: String, val z: Int, val x: Int, val y: Int)
 
+/** One download run, kept so the settings screen can show what was (or still is) being fetched. */
+data class DownloadLogEntry(
+    val id: Long,
+    val name: String,
+    val auto: Boolean,
+    val startedAt: Long,
+    val updatedAt: Long,
+    val lastTileAt: Long?,
+    val endedAt: Long?,
+    val tiles: Long,
+    val bytes: Long,
+    val remaining: Long,
+    val result: String,
+    val message: String?,
+)
+
 /**
  * On-device copy of everything the web map loads from OpenFreeMap (styles, TileJSON, sprites, glyphs, tiles).
  *
@@ -80,7 +96,7 @@ class TileCache(context: Context) {
 
     // ---- Regions ----------------------------------------------------------------------
 
-    fun createRegion(name: String, tiles: Collection<TileKey>): Long {
+    fun createRegion(name: String, tiles: Collection<TileKey>, auto: Boolean = false): Long {
         val db = db
         db.beginTransaction()
         try {
@@ -91,21 +107,47 @@ class TileCache(context: Context) {
                     put("name", name)
                     put("created_at", System.currentTimeMillis())
                     put("required", tiles.size)
+                    put("auto", if (auto) 1 else 0)
                 },
             )
-            val stmt = db.compileStatement("INSERT OR IGNORE INTO region_tiles(region_id,source,z,x,y) VALUES(?,?,?,?,?)")
-            tiles.forEach {
-                stmt.bindLong(1, id)
-                stmt.bindString(2, it.source)
-                stmt.bindLong(3, it.z.toLong())
-                stmt.bindLong(4, it.x.toLong())
-                stmt.bindLong(5, it.y.toLong())
-                stmt.executeInsert()
-            }
+            insertRegionTiles(db, id, tiles)
             db.setTransactionSuccessful()
             return id
         } finally {
             db.endTransaction()
+        }
+    }
+
+    /** The region that grows with every recorded track, and the newest track time it already covers. */
+    fun autoRegion(): Pair<Long, Long>? =
+        db.rawQuery("SELECT id,covered_until FROM regions WHERE auto=1 ORDER BY id LIMIT 1", null)
+            .use { if (it.moveToFirst()) it.getLong(0) to it.getLong(1) else null }
+
+    /** Adds [tiles] to a region and records that tracks up to [coveredUntil] are part of it. */
+    fun extendRegion(id: Long, tiles: Collection<TileKey>, coveredUntil: Long) {
+        val db = db
+        db.beginTransaction()
+        try {
+            insertRegionTiles(db, id, tiles)
+            db.execSQL(
+                "UPDATE regions SET required=(SELECT COUNT(*) FROM region_tiles WHERE region_id=?),covered_until=? WHERE id=?",
+                arrayOf(id, coveredUntil, id),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun insertRegionTiles(db: SQLiteDatabase, id: Long, tiles: Collection<TileKey>) {
+        val stmt = db.compileStatement("INSERT OR IGNORE INTO region_tiles(region_id,source,z,x,y) VALUES(?,?,?,?,?)")
+        tiles.forEach {
+            stmt.bindLong(1, id)
+            stmt.bindString(2, it.source)
+            stmt.bindLong(3, it.z.toLong())
+            stmt.bindLong(4, it.x.toLong())
+            stmt.bindLong(5, it.y.toLong())
+            stmt.executeInsert()
         }
     }
 
@@ -120,14 +162,14 @@ class TileCache(context: Context) {
     ).use { c -> buildList { while (c.moveToNext()) add(TileKey(c.getString(0), c.getInt(1), c.getInt(2), c.getInt(3))) } }
 
     fun regions(): List<OfflineRegionInfo> = db.rawQuery(
-        "SELECT r.id,r.name,r.required,COUNT(t.z),COALESCE(SUM(LENGTH(t.data)),0) FROM regions r " +
+        "SELECT r.id,r.name,r.required,COUNT(t.z),COALESCE(SUM(LENGTH(t.data)),0),r.auto FROM regions r " +
             "LEFT JOIN region_tiles rt ON rt.region_id=r.id " +
             "LEFT JOIN tiles t ON t.source=rt.source AND t.z=rt.z AND t.x=rt.x AND t.y=rt.y " +
             "GROUP BY r.id ORDER BY r.created_at DESC",
         null,
     ).use { c ->
         buildList {
-            while (c.moveToNext()) add(OfflineRegionInfo(c.getLong(0), c.getString(1), c.getLong(3), c.getLong(2), c.getLong(4)))
+            while (c.moveToNext()) add(OfflineRegionInfo(c.getLong(0), c.getString(1), c.getLong(3), c.getLong(2), c.getLong(4), c.getInt(5) == 1))
         }
     }
 
@@ -151,6 +193,77 @@ class TileCache(context: Context) {
         }
         reclaimSpace()
         return deleted
+    }
+
+    // ---- Download log ----------------------------------------------------------------
+
+    /** Opens a log row for a download that is about to fetch [remaining] tiles. */
+    fun startLog(name: String, auto: Boolean, remaining: Int): Long {
+        val now = System.currentTimeMillis()
+        return db.insertOrThrow(
+            "download_log",
+            null,
+            ContentValues().apply {
+                put("region_name", name)
+                put("auto", if (auto) 1 else 0)
+                put("started_at", now)
+                put("updated_at", now)
+                put("remaining", remaining)
+                put("result", LOG_RUNNING)
+            },
+        )
+    }
+
+    /** Heartbeat of a running download: what it has fetched so far and when the last tile arrived. */
+    fun updateLog(id: Long, tiles: Long, bytes: Long, remaining: Long, lastTileAt: Long) {
+        db.execSQL(
+            "UPDATE download_log SET tiles=?,bytes=?,remaining=?,last_tile_at=NULLIF(?,0),updated_at=? WHERE id=?",
+            arrayOf<Any>(tiles, bytes, remaining, lastTileAt, System.currentTimeMillis(), id),
+        )
+    }
+
+    fun finishLog(id: Long, result: String, message: String?, tiles: Long, bytes: Long, remaining: Long, lastTileAt: Long) {
+        val now = System.currentTimeMillis()
+        db.execSQL(
+            "UPDATE download_log SET result=?,message=?,tiles=?,bytes=?,remaining=?,last_tile_at=NULLIF(?,0),updated_at=?,ended_at=? WHERE id=?",
+            arrayOf<Any?>(result, message, tiles, bytes, remaining, lastTileAt, now, now, id),
+        )
+    }
+
+    /** Rows still marked running belong to a process that died mid-download. */
+    fun closeInterruptedLogs() {
+        db.execSQL(
+            "UPDATE download_log SET result=?,message=?,ended_at=updated_at WHERE result=?",
+            arrayOf(LOG_STOPPED, "앱이 종료되어 중단됨", LOG_RUNNING),
+        )
+        db.execSQL("DELETE FROM download_log WHERE id NOT IN (SELECT id FROM download_log ORDER BY id DESC LIMIT $LOG_KEEP)")
+    }
+
+    fun recentLogs(limit: Int): List<DownloadLogEntry> = db.rawQuery(
+        "SELECT id,region_name,auto,started_at,updated_at,last_tile_at,ended_at,tiles,bytes,remaining,result,message " +
+            "FROM download_log ORDER BY id DESC LIMIT ?",
+        arrayOf(limit.toString()),
+    ).use { c ->
+        buildList {
+            while (c.moveToNext()) {
+                add(
+                    DownloadLogEntry(
+                        id = c.getLong(0),
+                        name = c.getString(1),
+                        auto = c.getInt(2) == 1,
+                        startedAt = c.getLong(3),
+                        updatedAt = c.getLong(4),
+                        lastTileAt = if (c.isNull(5)) null else c.getLong(5),
+                        endedAt = if (c.isNull(6)) null else c.getLong(6),
+                        tiles = c.getLong(7),
+                        bytes = c.getLong(8),
+                        remaining = c.getLong(9),
+                        result = c.getString(10),
+                        message = c.getString(11),
+                    ),
+                )
+            }
+        }
     }
 
     // ---- Storage ----------------------------------------------------------------------
@@ -283,15 +396,28 @@ class TileCache(context: Context) {
             db.execSQL("CREATE TABLE regions (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,created_at INTEGER NOT NULL,required INTEGER NOT NULL)")
             db.execSQL("CREATE TABLE region_tiles (region_id INTEGER NOT NULL,source TEXT NOT NULL,z INTEGER NOT NULL,x INTEGER NOT NULL,y INTEGER NOT NULL,PRIMARY KEY(region_id,source,z,x,y)) WITHOUT ROWID")
             db.execSQL("CREATE INDEX idx_region_tiles_tile ON region_tiles(source,z,x,y)")
+            onUpgrade(db, 1, DB_VERSION)
         }
 
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            if (oldVersion < 2) {
+                // auto: the region that grows with recorded tracks; covered_until: newest track time it includes.
+                db.execSQL("ALTER TABLE regions ADD COLUMN auto INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE regions ADD COLUMN covered_until INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE TABLE download_log (id INTEGER PRIMARY KEY AUTOINCREMENT,region_name TEXT NOT NULL,auto INTEGER NOT NULL,started_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_tile_at INTEGER,ended_at INTEGER,tiles INTEGER NOT NULL DEFAULT 0,bytes INTEGER NOT NULL DEFAULT 0,remaining INTEGER NOT NULL DEFAULT 0,result TEXT NOT NULL,message TEXT)")
+            }
+        }
     }
 
     companion object {
         const val HOST = "tiles.openfreemap.org"
         private const val DB_NAME = "offline-tiles.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
+        private const val LOG_KEEP = 50
+        const val LOG_RUNNING = "running"
+        const val LOG_COMPLETE = "complete"
+        const val LOG_STOPPED = "stopped"
+        const val LOG_FAILED = "failed"
         private const val AMBIENT_LIMIT_BYTES = 200L * 1024 * 1024
         private const val TRIM_EVERY = 200
         private const val TOUCH_INTERVAL_MS = 24L * 60 * 60 * 1000
