@@ -123,9 +123,14 @@ const LOCATE_ZOOM = 17
 /** How far from the edges the marker may roam (share of the visible area) before the camera follows it. */
 const COMFORT_FOLLOWING = 0.24
 const COMFORT_FREE = 0.14
-/** Time constant of the camera chasing the marker. */
+/** Time constant of the camera chasing the marker, and the share of the visible area it is never allowed into. */
 const CHASE_TAU_MS = 110
-const FRAME_MARGIN = { top: 32, bottom: 32, left: 44, right: 44 }
+const CHASE_HARD_EDGE = 0.1
+/** Share of the route's extent also framed on the far side of the marker, so it never ends up in a corner. */
+const FRAME_LOOKAROUND = 0.5
+const FRAME_MARGIN = { top: 32, bottom: 32, left: 44, right: 16 }
+/** Width of the map button column on the right. */
+const CONTROLS_RIGHT = 60
 const easeOutCubic = (x: number) => 1 - (1 - x) ** 3
 
 export function MapView(props: MapViewProps) {
@@ -165,11 +170,19 @@ export function MapView(props: MapViewProps) {
     [props.pins],
   )
 
-  /** The part of the canvas not covered by overlays, in CSS px. */
+  /** The part of the canvas not covered by overlays (the right edge holds the map buttons), in CSS px. */
   const visibleArea = (map: maplibregl.Map) => {
     const { top, bottom } = props$.current.padding
     const c = map.getContainer()
-    return { left: 0, top, right: c.clientWidth, bottom: Math.max(top + 1, c.clientHeight - bottom) }
+    return { left: 0, top, right: Math.max(1, c.clientWidth - CONTROLS_RIGHT), bottom: Math.max(top + 1, c.clientHeight - bottom) }
+  }
+
+  const inComfort = (map: maplibregl.Map, lng: number, lat: number) => {
+    const v = visibleArea(map)
+    const ix = (v.right - v.left) * COMFORT_FOLLOWING
+    const iy = (v.bottom - v.top) * COMFORT_FOLLOWING
+    const p = map.project([lng, lat])
+    return p.x >= v.left + ix && p.x <= v.right - ix && p.y >= v.top + iy && p.y <= v.bottom - iy
   }
 
   const stopChase = () => {
@@ -193,12 +206,20 @@ export function MapView(props: MapViewProps) {
     const dx = p.x < v.left + ix ? p.x - (v.left + ix) : p.x > v.right - ix ? p.x - (v.right - ix) : 0
     const dy = p.y < v.top + iy ? p.y - (v.top + iy) : p.y > v.bottom - iy ? p.y - (v.bottom - iy) : 0
     if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return
-    // Far away (a fast fling, a subway hop): skip most of the way instead of sweeping across the city.
-    const far = Math.hypot(dx, dy)
-    const reach = Math.max(v.right - v.left, v.bottom - v.top)
-    const k = far > reach ? 1 - reach / 2 / far : 1 - Math.exp(-dt / CHASE_TAU_MS)
+    // Spring toward the comfort area, but never let the marker get closer than CHASE_HARD_EDGE to the screen edge:
+    // fast stretches (a subway ride, a fling) would otherwise outrun the spring and leave the screen.
+    const k = 1 - Math.exp(-dt / CHASE_TAU_MS)
+    const step = (d: number, room: number) => {
+      const slack = Math.max(0, room)
+      return Math.sign(d) * (Math.max(0, Math.abs(d) - slack) + Math.min(Math.abs(d), slack) * k)
+    }
     const c = map.project(map.getCenter())
-    map.jumpTo({ center: map.unproject([c.x + dx * k, c.y + dy * k]) })
+    map.jumpTo({
+      center: map.unproject([
+        c.x + step(dx, ix - (v.right - v.left) * CHASE_HARD_EDGE),
+        c.y + step(dy, iy - (v.bottom - v.top) * CHASE_HARD_EDGE),
+      ]),
+    })
     chaseRaf.current = requestAnimationFrame(chaseStep)
   }
 
@@ -349,7 +370,8 @@ export function MapView(props: MapViewProps) {
     const wasFollowing = following.current
     if (kind !== 'commit') setFollowing(true)
     const v = visibleArea(map)
-    const centerOffset: [number, number] = [0, (v.top - (map.getContainer().clientHeight - v.bottom)) / 2]
+    const { clientWidth: cw, clientHeight: ch } = map.getContainer()
+    const centerOffset: [number, number] = [(v.left - (cw - v.right)) / 2, (v.top - (ch - v.bottom)) / 2]
 
     if (!following.current) {
       // A map the user moved stays put unless the marker has left the screen.
@@ -364,12 +386,17 @@ export function MapView(props: MapViewProps) {
     const to = lowerBound(points, rt + 1)
     const bounds = new maplibregl.LngLatBounds([pos.lng, pos.lat], [pos.lng, pos.lat])
     for (let i = from; i < to; i++) bounds.extend([points[i][2], points[i][1]])
+    // The marker is where the route ends, so it would sit in a corner; leave room on its far side too.
+    const sw = bounds.getSouthWest()
+    const ne = bounds.getNorthEast()
+    bounds.extend([pos.lng + (pos.lng - sw.lng) * FRAME_LOOKAROUND, pos.lat + (pos.lat - sw.lat) * FRAME_LOOKAROUND])
+    bounds.extend([pos.lng + (pos.lng - ne.lng) * FRAME_LOOKAROUND, pos.lat + (pos.lat - ne.lat) * FRAME_LOOKAROUND])
     const container = map.getContainer()
     const margin = {
       top: v.top + FRAME_MARGIN.top,
       bottom: container.clientHeight - v.bottom + FRAME_MARGIN.bottom,
       left: FRAME_MARGIN.left,
-      right: FRAME_MARGIN.right,
+      right: container.clientWidth - v.right + FRAME_MARGIN.right,
     }
     const cam = map.cameraForBounds(bounds as LngLatBoundsLike, { padding: margin, maxZoom: FRAME_MAX_ZOOM })
     if (!cam || cam.zoom === undefined || !cam.center) return
@@ -381,11 +408,13 @@ export function MapView(props: MapViewProps) {
       return
     }
 
-    // Already showing all of it at a similar scale: leave the camera alone rather than nudge it on every scrub.
-    const sw = map.project(bounds.getSouthWest())
-    const ne = map.project(bounds.getNorthEast())
-    const inView = Math.min(sw.x, ne.x) >= v.left + 12 && Math.max(sw.x, ne.x) <= v.right - 12 && Math.min(sw.y, ne.y) >= v.top + 12 && Math.max(sw.y, ne.y) <= v.bottom - 12
-    const settled = inView && cam.zoom - zoom < 0.75 && zoom - cam.zoom < 1.25
+    // Already showing all of it at a similar scale, with the marker well inside: leave the camera alone rather than
+    // nudge it on every scrub.
+    const a = map.project(sw)
+    const b = map.project(ne)
+    const inView = Math.min(a.x, b.x) >= v.left + 12 && Math.max(a.x, b.x) <= v.right - 12 && Math.min(a.y, b.y) >= v.top + 12 && Math.max(a.y, b.y) <= v.bottom - 12
+    // (Mid-animation the camera isn't where it is heading, so frame afresh.)
+    const settled = !map.isEasing() && inView && cam.zoom - zoom < 0.75 && zoom - cam.zoom < 1.25 && inComfort(map, pos.lng, pos.lat)
     if (settled) {
       if (kind === 'locate' && wasFollowing) {
         map.easeTo({ center: [pos.lng, pos.lat], offset: centerOffset, zoom: Math.max(zoom, LOCATE_ZOOM), duration: 500, easing: easeOutCubic })

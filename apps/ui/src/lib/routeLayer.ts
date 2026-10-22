@@ -17,8 +17,8 @@ export interface RoutePalette {
   marker: string
 }
 
-export const LIGHT_ROUTE: RoutePalette = { recent: '#1b64f2', mid: '#5f9ef8', old: '#b3cdf5', casing: '#ffffff', ghost: 'rgba(84,96,116,0.5)', marker: '#3182f6' }
-export const DARK_ROUTE: RoutePalette = { recent: '#5aa5ff', mid: '#3a74c4', old: '#2c4466', casing: '#12151b', ghost: 'rgba(150,160,178,0.42)', marker: '#4d9bff' }
+export const LIGHT_ROUTE: RoutePalette = { recent: '#1b64f2', mid: '#5f9ef8', old: '#b3cdf5', casing: '#ffffff', ghost: 'rgba(84,96,116,0.6)', marker: '#3182f6' }
+export const DARK_ROUTE: RoutePalette = { recent: '#5aa5ff', mid: '#3a74c4', old: '#2c4466', casing: '#12151b', ghost: 'rgba(170,180,198,0.6)', marker: '#4d9bff' }
 
 export interface RouteFrame {
   time: number
