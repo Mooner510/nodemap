@@ -72,8 +72,26 @@ function dropImprecise(points: readonly TrackPoint[]): TrackPoint[] {
 const SPIKE_MIN_METERS = 40
 /** Faster than any ground travel the app records (≈250km/h). */
 const SPIKE_SPEED_MPS = 70
+/** cos of the turn beyond which the track is doubling back (135°). */
+const BACKTRACK_COS = -0.7
+/** A doubling-back leg up to this many times the fix's error is read as error, not as a real U-turn. */
+const BACKTRACK_ACCURACY_FACTOR = 1.5
 
-/** Drops fixes that jump out and come straight back, when the jump is within the fix's own error or impossibly fast. */
+/** cos of the angle between a→b and b→c, on a local flat projection. */
+function turnCos(a: TrackPoint, b: TrackPoint, c: TrackPoint): number {
+  const k = Math.cos((b[1] * Math.PI) / 180)
+  const ux = (b[2] - a[2]) * k
+  const uy = b[1] - a[1]
+  const vx = (c[2] - b[2]) * k
+  const vy = c[1] - b[1]
+  const n = Math.hypot(ux, uy) * Math.hypot(vx, vy)
+  return n ? (ux * vx + uy * vy) / n : 1
+}
+
+/**
+ * Drops fixes that jump out and come back: straight back when the jump is within the fix's own error or impossibly
+ * fast, or partly back (an overshoot, typical of network fixes on a subway) when the doubling-back is within its error.
+ */
 function dropSpikes(points: readonly TrackPoint[]): TrackPoint[] {
   if (points.length < 3) return points.slice()
   const out: TrackPoint[] = [points[0]]
@@ -86,6 +104,8 @@ function dropSpikes(points: readonly TrackPoint[]): TrackPoint[] {
     const outAndBack = ab > SPIKE_MIN_METERS && bc > SPIKE_MIN_METERS && haversine(a, c) < 0.5 * Math.min(ab, bc)
     const tooFast = ab / Math.max(1, (b[0] - a[0]) / 1000) > SPIKE_SPEED_MPS && bc / Math.max(1, (c[0] - b[0]) / 1000) > SPIKE_SPEED_MPS
     if (outAndBack && (b[3] >= 0.5 * ab || tooFast)) continue
+    const backtrack = Math.min(ab, bc) > 0 && turnCos(a, b, c) < BACKTRACK_COS && Math.min(ab, bc) <= BACKTRACK_ACCURACY_FACTOR * b[3]
+    if (backtrack) continue
     out.push(b)
   }
   out.push(points[points.length - 1])
@@ -132,10 +152,15 @@ function collapseStays(points: readonly TrackPoint[]): TrackPoint[] {
   return out
 }
 
+/**
+ * Distance travelled, counting a stretch without fixes (a subway hop, a fix dropped as noise) as the straight line
+ * across it unless covering it would have taken impossible speed.
+ */
 export function routeDistance(points: readonly TrackPoint[]): number {
   let d = 0
   for (let i = 1; i < points.length; i++) {
-    if (points[i][0] - points[i - 1][0] <= GAP_MS) d += haversine(points[i - 1], points[i])
+    const m = haversine(points[i - 1], points[i])
+    if (m / Math.max(1, (points[i][0] - points[i - 1][0]) / 1000) <= SPIKE_SPEED_MPS) d += m
   }
   return d
 }

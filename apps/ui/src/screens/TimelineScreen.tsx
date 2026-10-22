@@ -84,6 +84,11 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
 
   const dayStart = parseDayKey(day)
   const dayPoints = useMemo(() => points.filter((p) => p[0] >= dayStart && p[0] < dayStart + DAY), [points, dayStart])
+  // Recording span comes from the raw fixes: cleaning folds a stay into its arrival and departure only.
+  const dayRecorded = useMemo(() => {
+    const raw = (data?.points ?? []).filter((p) => p[0] >= dayStart && p[0] < dayStart + DAY)
+    return raw.length ? { first: raw[0][0], last: raw[raw.length - 1][0] } : null
+  }, [data, dayStart])
   const dayPins = useMemo(() => pins.filter((p) => p.t >= dayStart && p.t < dayStart + DAY), [pins, dayStart])
 
   const latest = data?.latest ?? null
@@ -257,8 +262,8 @@ export function TimelineScreen({ settings }: { settings: Settings }) {
       <Sheet open={daySheetOpen} onClose={() => setDaySheetOpen(false)} title={`${fmtDay(dayStart)}`}>
         <DaySummary
           distance={routeDistance(dayPoints)}
-          first={dayPoints[0]?.[0]}
-          last={dayPoints[dayPoints.length - 1]?.[0]}
+          first={dayRecorded?.first}
+          last={dayRecorded?.last}
           pins={dayPins}
           onPick={(t) => { setDaySheetOpen(false); jump(t) }}
         />
