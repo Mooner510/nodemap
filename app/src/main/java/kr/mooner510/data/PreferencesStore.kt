@@ -32,6 +32,7 @@ data class AppSettings(
     val detailWindowMinutes: Int = 120,
     val totalWindowMinutes: Int = 720,
     val cameraWindowMinutes: Int = 30,
+    val autoOfflineMaps: Boolean = true,
 )
 
 class PreferencesStore(private val context: Context) {
@@ -45,6 +46,7 @@ class PreferencesStore(private val context: Context) {
     suspend fun setAutoStartAfterBoot(value: Boolean) = set(AUTO_BOOT, value)
     suspend fun setMapStyleUri(value: String) = set(MAP_STYLE_URI, value)
     suspend fun setOnboardingCompleted(value: Boolean) = set(ONBOARDING_COMPLETED, value)
+    suspend fun setAutoOfflineMaps(value: Boolean) = set(AUTO_OFFLINE_MAPS, value)
 
     suspend fun setTimelineDisplaySettings(
         tickMinutes: Int,
@@ -86,6 +88,7 @@ class PreferencesStore(private val context: Context) {
             detailWindowMinutes = detail,
             totalWindowMinutes = total,
             cameraWindowMinutes = camera,
+            autoOfflineMaps = preferences[AUTO_OFFLINE_MAPS] ?: true,
         )
     }
 
@@ -107,5 +110,6 @@ class PreferencesStore(private val context: Context) {
         private val DETAIL_WINDOW_MINUTES = intPreferencesKey("detail_window_minutes")
         private val TOTAL_WINDOW_MINUTES = intPreferencesKey("total_window_minutes")
         private val CAMERA_WINDOW_MINUTES = intPreferencesKey("camera_window_minutes")
+        private val AUTO_OFFLINE_MAPS = booleanPreferencesKey("auto_offline_maps")
     }
 }

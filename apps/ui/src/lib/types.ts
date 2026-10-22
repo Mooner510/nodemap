@@ -13,6 +13,8 @@ export interface Settings {
   detailWindowMinutes: number
   totalWindowMinutes: number
   cameraWindowMinutes: number
+  /** Grow the auto region with new tracks while the app is open on Wi-Fi. */
+  autoOfflineMaps: boolean
 }
 
 /** [timestampMs, latitude, longitude, accuracyMeters] — compact because a day holds thousands of them. */
@@ -131,7 +133,7 @@ export interface CloudBackupMetadata {
 
 export type OfflineDownload =
   | { state: 'idle' }
-  | { state: 'downloading'; name: string; completed: number; required: number; bytes: number }
+  | { state: 'downloading'; name: string; completed: number; required: number; bytes: number; auto?: boolean; lastTileAt?: number | null }
   | { state: 'complete'; name: string; bytes: number }
   | { state: 'failed'; message: string }
 
@@ -141,6 +143,30 @@ export interface OfflineRegion {
   completed: number
   required: number
   bytes: number
+  /** The region that grows with recorded tracks. */
+  auto?: boolean
+}
+
+export interface AutoSyncStatus {
+  enabled: boolean
+  foreground: boolean
+  wifi: boolean
+}
+
+export interface DownloadLogEntry {
+  id: number
+  name: string
+  auto: boolean
+  startedAt: number
+  /** Heartbeat: written every ~2 s while the download runs. */
+  updatedAt: number
+  lastTileAt: number | null
+  endedAt: number | null
+  tiles: number
+  bytes: number
+  remaining: number
+  result: 'running' | 'complete' | 'stopped' | 'failed'
+  message: string | null
 }
 
 export interface OfflineMaps {
@@ -148,6 +174,9 @@ export interface OfflineMaps {
   days: string[]
   regions: OfflineRegion[]
   download: OfflineDownload
+  auto: AutoSyncStatus
+  /** Newest first. */
+  log: DownloadLogEntry[]
 }
 
 export interface BridgeEvents {
@@ -155,6 +184,7 @@ export interface BridgeEvents {
   'settings-changed': Settings
   'backup-progress': BackupProgress
   'offline-changed': OfflineDownload
+  'offline-auto-changed': AutoSyncStatus
   /** The activity came back to the foreground (permissions may have changed in system settings). */
   resumed: void
 }
